@@ -1,8 +1,6 @@
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
-use crate::constants::{
-    CONTENT_DIR, DLL_NAME, ELDENRING_EXE, ELDENRING_ID, PROCESS_INJECTION_ACCESS,
-};
+use crate::constants::{ELDENRING_EXE, ELDENRING_ID, PROCESS_INJECTION_ACCESS};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use steamlocate::SteamDir;
@@ -30,15 +28,7 @@ fn locate_executable() -> PathBuf {
 }
 
 fn open_process_by_pid(pid: u32) -> Option<HANDLE> {
-    unsafe {
-        OpenProcess(
-            // access required for performing dll injection
-            *PROCESS_INJECTION_ACCESS,
-            false,
-            pid,
-        )
-    }
-    .ok()
+    unsafe { OpenProcess(PROCESS_INJECTION_ACCESS, false, pid) }.ok()
 }
 
 pub fn kill_process(pid: u32) {
@@ -67,7 +57,7 @@ pub fn get_pids_by_name(name: &str) -> Vec<u32> {
         .collect()
 }
 
-pub fn start_game() -> Result<(), Box<dyn std::error::Error>> {
+pub fn start_game(content_dir: &str, dll_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Kill existing processes
     for pid in get_pids_by_name(ELDENRING_EXE) {
         kill_process(pid);
@@ -79,7 +69,7 @@ pub fn start_game() -> Result<(), Box<dyn std::error::Error>> {
     let parent_dir = current_exe
         .parent()
         .ok_or("Failed to get current executable dir path")?;
-    let dll_path = parent_dir.join(&*CONTENT_DIR).join(&*DLL_NAME);
+    let dll_path = parent_dir.join(content_dir).join(dll_name);
 
     tracing::info!("Injecting DLL: {:?}", dll_path);
 
@@ -90,7 +80,7 @@ pub fn start_game() -> Result<(), Box<dyn std::error::Error>> {
     // Set Steam App ID
     std::env::set_var("SteamAppId", ELDENRING_ID.to_string());
     // Set Content Dir
-    std::env::set_var("DEN_CONTENT_DIR", parent_dir.join(&*CONTENT_DIR));
+    std::env::set_var("DEN_CONTENT_DIR", parent_dir.join(content_dir));
 
     // Create process
     let process_info = create_suspended_process(&executable_path)?;

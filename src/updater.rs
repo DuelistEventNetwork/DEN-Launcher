@@ -1,11 +1,10 @@
 use std::io::{Seek, Write};
 
 use crate::{
-    constants::{CONTENT_DIR, DLL_NAME, ELDENRING_EXE, REPO_NAME, REPO_OWNER, REPO_PRIVATE_KEY},
+    constants::ELDENRING_EXE,
     injector::{get_pids_by_name, kill_process},
 };
 
-use const_format::formatcp;
 use semver::Version;
 use serde::Deserialize;
 use walkdir::WalkDir;
@@ -29,16 +28,20 @@ pub fn bump_is_greater(current: &str, other: &str) -> Option<bool> {
     Some(Version::parse(other).ok()? > Version::parse(current).ok()?)
 }
 
-fn get_update() -> Option<Release> {
+fn get_update(
+    repo_owner: &str,
+    repo_name: &str,
+    repo_private_key: Option<&str>,
+) -> Option<Release> {
     let mut request = ureq::get(&format!(
         "https://api.github.com/repos/{}/{}/releases",
-        *REPO_OWNER, *REPO_NAME
+        repo_owner, repo_name
     ))
-    .set("User-Agent", formatcp!("denlauncher/{}", VERSION))
+    .set("User-Agent", &format!("denlauncher/{}", VERSION))
     .query("per_page", "20");
 
-    if !REPO_PRIVATE_KEY.is_empty() {
-        request = request.set("Authorization", &format!("token {}", *REPO_PRIVATE_KEY));
+    if let Some(token) = repo_private_key {
+        request = request.set("Authorization", &format!("token {}", token));
     }
 
     let response = request
@@ -80,27 +83,38 @@ fn verify_signature(
     Ok(())
 }
 
-fn update_from_asset(asset: &ReleaseAsset) {
+fn update_from_asset(
+    asset: &ReleaseAsset,
+    content_dir: &str,
+    dll_name: &str,
+    repo_private_key: Option<&str>,
+) {
     for pid in get_pids_by_name(ELDENRING_EXE) {
         kill_process(pid);
     }
 
-    let (exe_dir, content_dir, dll_path) = get_paths();
-    let (tmp_archive, tmp_dir) = download_asset(asset);
+    let (exe_dir, content_dir, dll_path) = get_paths(content_dir, dll_name);
+    let (tmp_archive, tmp_dir) = download_asset(asset, repo_private_key);
     remove_old_content(content_dir, dll_path);
     extract_archive(&tmp_archive, &tmp_dir);
     perform_binary_replacement(&tmp_dir, exe_dir);
 }
 
-fn get_paths() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+fn get_paths(
+    content_dir: &str,
+    dll_name: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     let current_exe = std::env::current_exe().unwrap();
     let exe_dir = current_exe.parent().unwrap().to_path_buf();
-    let content_dir = exe_dir.join(&*CONTENT_DIR);
-    let dll_path = content_dir.join(&*DLL_NAME);
+    let content_dir = exe_dir.join(content_dir);
+    let dll_path = content_dir.join(dll_name);
     (exe_dir, content_dir, dll_path)
 }
 
-fn download_asset(asset: &ReleaseAsset) -> (std::fs::File, tempfile::TempDir) {
+fn download_asset(
+    asset: &ReleaseAsset,
+    repo_private_key: Option<&str>,
+) -> (std::fs::File, tempfile::TempDir) {
     let tmp_archive_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let mut tmp_archive_file = tempfile::tempfile().expect("Failed to create temp file");
 
@@ -109,11 +123,11 @@ fn download_asset(asset: &ReleaseAsset) -> (std::fs::File, tempfile::TempDir) {
     let mut request = ureq::get(&asset.url)
         .set(
             "User-Agent",
-            formatcp!("denlauncher/{}", env!("CARGO_PKG_VERSION")),
+            &format!("denlauncher/{}", env!("CARGO_PKG_VERSION")),
         )
         .set("Accept", "application/octet-stream");
-    if !REPO_PRIVATE_KEY.is_empty() {
-        request = request.set("Authorization", &format!("token {}", *REPO_PRIVATE_KEY));
+    if let Some(token) = repo_private_key {
+        request = request.set("Authorization", &format!("token {}", token));
     }
     let mut buf = Vec::new();
     let response = request.call().expect("Failed to download archive");
@@ -224,8 +238,14 @@ fn handle_file_entry(
     }
 }
 
-pub fn start_updater() {
-    if let Some(release) = get_update() {
+pub fn start_updater(
+    repo_owner: &str,
+    repo_name: &str,
+    repo_private_key: Option<&str>,
+    content_dir: &str,
+    dll_name: &str,
+) {
+    if let Some(release) = get_update(repo_owner, repo_name, repo_private_key) {
         tracing::info!(
             "Found new release: {}",
             release.tag_name.trim_start_matches("v")
@@ -236,7 +256,7 @@ pub fn start_updater() {
             .iter()
             .find(|asset| asset.name.ends_with(".zip"))
         {
-            update_from_asset(asset)
+            update_from_asset(asset, content_dir, dll_name, repo_private_key);
         }
         tracing::info!("Update complete, please restart the launcher");
         std::thread::sleep(std::time::Duration::from_secs(5));
