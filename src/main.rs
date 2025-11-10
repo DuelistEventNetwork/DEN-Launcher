@@ -19,7 +19,7 @@ struct Args {
     updater_repo_owner: String,
     #[arg(long, env("DEN_REPO_NAME"), default_value = dotenv!("DEN_REPO_NAME"))]
     updater_repo_name: String,
-    #[arg(long, env("DEN_REPO_PRIVATE_KEY"))]
+    #[arg(long)]
     updater_repo_private_key: Option<String>,
     #[arg(long, env("DEN_CONTENT_DIR"), default_value = dotenv!("DEN_CONTENT_DIR"))]
     content_dir: String,
