@@ -4,6 +4,7 @@ mod logging;
 mod updater;
 
 use clap::Parser;
+use constants::ELDENRING_EXE;
 use dotenvy_macro::dotenv;
 use injector::start_game;
 use logging::{den_panic_hook, enable_ansi_support, setup_logging};
@@ -25,24 +26,24 @@ struct Args {
     content_dir: String,
     #[arg(long, env("DEN_DLL_NAME"), default_value = dotenv!("DEN_DLL_NAME"))]
     dll_name: String,
+    #[arg(long, env("DEN_GAME_EXECUTABLE"), default_value = ELDENRING_EXE)]
+    game_executable: String,
+    #[arg(long, env("DEN_DEBUG"), default_value_t = cfg!(debug_assertions))]
+    debug: bool,
 }
 
 fn main() {
     dotenvy::dotenv().ok();
+    let args = Args::parse();
 
     enable_ansi_support().ok();
 
-    setup_logging();
+    setup_logging(args.debug);
 
     std::panic::set_hook(Box::new(den_panic_hook));
 
-    let args = Args::parse();
-
     tracing::info!("Starting DenLauncher v{}", env!("CARGO_PKG_VERSION"));
-    tracing::info!(
-        " value of DEN_PRIVATE_KEY: {:?}",
-        args.updater_repo_private_key
-    );
+
     if args.skip_updates {
         tracing::info!("--skip-updates flag passed, skipping update check.");
     } else {
@@ -58,7 +59,12 @@ fn main() {
 
     tracing::info!("Starting Elden Ring...");
 
-    if let Err(err) = start_game(&args.content_dir, &args.dll_name) {
+    if let Err(err) = start_game(
+        &args.content_dir,
+        &args.dll_name,
+        &args.game_executable,
+        args.debug,
+    ) {
         tracing::error!("Failed to start Elden Ring: {:?}", err);
         std::thread::sleep(std::time::Duration::from_secs(5));
         std::process::exit(1);

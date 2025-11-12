@@ -1,6 +1,6 @@
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
-use crate::constants::{ELDENRING_EXE, ELDENRING_ID, PROCESS_INJECTION_ACCESS};
+use crate::constants::{ELDENRING_ID, PROCESS_INJECTION_ACCESS};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use steamlocate::SteamDir;
@@ -17,14 +17,14 @@ use windows::Win32::System::Threading::{
     STARTUPINFOA,
 };
 
-fn locate_executable() -> PathBuf {
+fn locate_executable(game_executable: &str) -> PathBuf {
     let steam_dir = SteamDir::locate().expect("Failed to locate Steam directory");
     let (app, lib) = steam_dir
         .find_app(ELDENRING_ID)
         .ok()
         .flatten()
         .expect("Failed to locate Elden Ring");
-    lib.resolve_app_dir(&app).join("Game").join(ELDENRING_EXE)
+    lib.resolve_app_dir(&app).join("Game").join(game_executable)
 }
 
 fn open_process_by_pid(pid: u32) -> Option<HANDLE> {
@@ -32,13 +32,6 @@ fn open_process_by_pid(pid: u32) -> Option<HANDLE> {
 }
 
 pub fn kill_process(pid: u32) {
-    if std::env::var("DEN_DEBUG").is_ok() {
-        tracing::warn!(
-            "Skipping process {} termination, because DEN_DEBUG is set",
-            pid
-        );
-        return;
-    }
     open_process_by_pid(pid).and_then(|handle| {
         unsafe { TerminateProcess(handle, 1) }
             .map_err(|err| tracing::error!("Failed to terminate process: {:?}", err))
@@ -57,14 +50,26 @@ pub fn get_pids_by_name(name: &str) -> Vec<u32> {
         .collect()
 }
 
-pub fn start_game(content_dir: &str, dll_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn start_game(
+    content_dir: &str,
+    dll_name: &str,
+    game_executable: &str,
+    debug: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Kill existing processes
-    for pid in get_pids_by_name(ELDENRING_EXE) {
+    for pid in get_pids_by_name(game_executable) {
+        if debug {
+            tracing::warn!(
+                "Skipping process {} termination, because DEN_DEBUG is set",
+                pid
+            );
+            continue;
+        }
         kill_process(pid);
     }
 
     // Setup paths
-    let executable_path = locate_executable();
+    let executable_path = locate_executable(game_executable);
     let current_exe = std::env::current_exe()?;
     let parent_dir = current_exe
         .parent()

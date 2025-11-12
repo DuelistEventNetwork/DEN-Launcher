@@ -60,7 +60,7 @@ pub fn den_panic_hook(panic_info: &std::panic::PanicHookInfo) {
     std::thread::sleep(std::time::Duration::from_secs(10));
 }
 
-pub fn setup_logging() {
+pub fn setup_logging(debug: bool) {
     let stdout_log = tracing_subscriber::fmt::layer()
         .pretty()
         .without_time()
@@ -69,15 +69,14 @@ pub fn setup_logging() {
         // disable module path
         .with_target(false);
 
-    let filter = tracing_subscriber::filter::EnvFilter::from_default_env().add_directive(
-        if cfg!(debug_assertions) {
+    let filter =
+        tracing_subscriber::filter::EnvFilter::from_default_env().add_directive(if debug {
             tracing_subscriber::filter::LevelFilter::DEBUG.into()
         } else {
             tracing_subscriber::filter::LevelFilter::INFO.into()
-        },
-    );
+        });
     let registry = tracing_subscriber::registry().with(stdout_log.with_filter(filter));
-    if std::env::var("DEN_DEBUG").is_ok() || cfg!(debug_assertions) {
+    if debug {
         let appender = tracing_appender::rolling::never("./", "denlauncher.log");
         let file_log = tracing_subscriber::fmt::layer()
             .with_writer(appender)
