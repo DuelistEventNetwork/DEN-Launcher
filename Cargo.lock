@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "DEN-Launcher"
-version = "2.0.0-rc.5+patch.4"
+version = "2.0.0-rc.6+patch.3"
 dependencies = [
  "clap",
  "cli_select",
