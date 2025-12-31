@@ -33,7 +33,6 @@ struct Args {
 }
 
 fn main() {
-    dotenvy::dotenv().ok();
     let args = Args::parse();
 
     enable_ansi_support().ok();
