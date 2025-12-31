@@ -18,6 +18,9 @@ serde = "1.0.217"
 walkdir = "2.5.0"
 cli_select = "0.1.6"
 
+[build-dependencies]
+winres = "0.1"
+
 [dependencies.clap]
 version = "4.5.4"
 features = ["derive", "env"]
