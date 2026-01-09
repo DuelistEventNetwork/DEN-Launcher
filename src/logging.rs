@@ -24,7 +24,7 @@ pub fn enable_ansi_support() -> Result<()> {
 
 pub fn den_panic_hook(panic_info: &std::panic::PanicHookInfo) {
     let message;
-    let title = "Den-Launcher Error";
+    let title = "Better Multiplayer Error";
     let reason = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
         *s
     } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {

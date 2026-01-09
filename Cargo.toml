@@ -1,7 +1,15 @@
 [package]
 name = "DEN-Launcher"
-version = "2.0.0-rc.6+patch.8"
+version = "2.0.0"
 edition = "2021"
+
+[features]
+default = ["migrations"]
+migrations = []
+
+[[bin]]
+name = "BetterMultiplayer"
+path = "src/main.rs"
 
 [dependencies]
 dotenvy_macro = "0.15"

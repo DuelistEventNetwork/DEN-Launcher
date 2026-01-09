@@ -1,4 +1,7 @@
-use std::io::{Seek, Write};
+use std::{
+    convert::TryInto,
+    io::{Read, Seek, Write},
+};
 
 use crate::{
     constants::ELDENRING_EXE,
@@ -11,6 +14,7 @@ use walkdir::WalkDir;
 use zip::ZipArchive;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const RELEASE_PUBLIC_KEY: &[u8] = include_bytes!("../release_public_key.bin");
 
 #[derive(Deserialize, Clone)]
 struct ReleaseAsset {
@@ -94,9 +98,9 @@ fn update_from_asset(
     }
 
     let (exe_dir, content_dir, dll_path) = get_paths(content_dir, dll_name);
-    let (tmp_archive, tmp_dir) = download_asset(asset, repo_private_key);
-    remove_old_content(content_dir, dll_path);
-    extract_archive(&tmp_archive, &tmp_dir);
+    let (mut tmp_archive, tmp_dir) = download_asset(asset, repo_private_key);
+    remove_old_content(&content_dir, &dll_path);
+    extract_archive(&mut tmp_archive, &tmp_dir);
     perform_binary_replacement(&tmp_dir, exe_dir);
 }
 
@@ -152,18 +156,37 @@ fn download_asset(
 
     tracing::info!("Downloaded archive: {:?}", tmp_archive_file);
 
-    verify_signature(
-        &mut tmp_archive_file,
-        asset.name.as_bytes(),
-        &[*include_bytes!("../release_public_key.bin")],
-    )
-    .expect("Failed to verify update archive signature");
+    let mut public_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]> = Vec::new();
+    match RELEASE_PUBLIC_KEY.try_into() {
+        Ok(key) => public_keys.push(key),
+        Err(_) =>
+        {
+            #[allow(clippy::const_is_empty)]
+            if !RELEASE_PUBLIC_KEY.is_empty() {
+                tracing::warn!(
+                    "release_public_key.bin has unexpected size ({} bytes); signature verification disabled",
+                    RELEASE_PUBLIC_KEY.len()
+                );
+            }
+        }
+    }
+
+    verify_signature(&mut tmp_archive_file, asset.name.as_bytes(), &public_keys)
+        .expect("Failed to verify update archive signature");
+
+    tmp_archive_file
+        .seek(std::io::SeekFrom::Start(0))
+        .expect("Failed to seek to start of verified temp file");
 
     (tmp_archive_file, tmp_archive_dir)
 }
 
-fn extract_archive(tmp_archive: &std::fs::File, temp_dir: &tempfile::TempDir) {
+fn extract_archive(tmp_archive: &mut std::fs::File, temp_dir: &tempfile::TempDir) {
     tracing::debug!("Extracting archive to: {:?}", tmp_archive);
+
+    tmp_archive
+        .seek(std::io::SeekFrom::Start(0))
+        .expect("Failed to seek to start of archive before extraction");
 
     ZipArchive::new(tmp_archive)
         .expect("Failed to open archive")
@@ -171,28 +194,27 @@ fn extract_archive(tmp_archive: &std::fs::File, temp_dir: &tempfile::TempDir) {
         .expect("Failed to extract archive");
 }
 
-fn remove_old_content(content_dir: std::path::PathBuf, dll_path: std::path::PathBuf) {
+fn remove_old_content(content_dir: &std::path::Path, dll_path: &std::path::Path) {
     tracing::info!("Removing old content");
-    std::fs::remove_file(&dll_path)
-        .map_err(|e| tracing::warn!("Failed to remove old DLL at {:?}: {}", &dll_path, e))
+
+    std::fs::remove_file(dll_path)
+        .map_err(|e| tracing::warn!("Failed to remove old DLL at {:?}: {}", dll_path, e))
         .ok();
-    // remove content dir if it's empty
-    std::fs::read_dir(&content_dir)
-        .map(|dir| dir.count())
-        .map(|count| {
-            if count == 0 {
-                std::fs::remove_dir(&content_dir)
-                    .map_err(|e| {
-                        tracing::warn!(
-                            "Failed to remove old content dir at {:?}: {}",
-                            &content_dir,
-                            e
-                        )
-                    })
-                    .ok();
-            }
-        })
-        .ok();
+
+    let content_is_empty = std::fs::read_dir(content_dir)
+        .map(|mut dir| dir.next().is_none())
+        .unwrap_or(false);
+    if content_is_empty {
+        std::fs::remove_dir(content_dir)
+            .map_err(|e| {
+                tracing::warn!(
+                    "Failed to remove old content dir at {:?}: {}",
+                    content_dir,
+                    e
+                )
+            })
+            .ok();
+    }
 }
 
 fn perform_binary_replacement(tmp_dir: &tempfile::TempDir, exe_dir: std::path::PathBuf) {

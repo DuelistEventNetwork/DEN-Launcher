@@ -1,6 +1,7 @@
 mod constants;
 mod injector;
 mod logging;
+mod migrations;
 mod updater;
 
 use clap::Parser;
@@ -41,7 +42,17 @@ fn main() {
 
     std::panic::set_hook(Box::new(den_panic_hook));
 
-    tracing::info!("Starting DenLauncher v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        "Starting Better Multiplayer Launcher v{}",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            tracing::info!("Running migrations in {:?}", exe_dir);
+            migrations::run(exe_dir);
+        }
+    }
 
     if args.skip_updates {
         tracing::info!("--skip-updates flag passed, skipping update check.");
