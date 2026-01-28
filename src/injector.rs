@@ -23,7 +23,7 @@ fn locate_executable(game_executable: &str) -> PathBuf {
         .find_app(ELDENRING_ID)
         .ok()
         .flatten()
-        .expect("Failed to locate Elden Ring");
+        .expect("Failed to locate Elden Ring, please ensure it is installed via Steam");
     lib.resolve_app_dir(&app).join("Game").join(game_executable)
 }
 
