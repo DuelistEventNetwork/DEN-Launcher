@@ -4,18 +4,18 @@ use crate::constants::{ELDENRING_ID, PROCESS_INJECTION_ACCESS};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use steamlocate::SteamDir;
-use windows::core::s;
-use windows::core::{PCSTR, PCWSTR};
 use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::Win32::System::Memory::{
-    VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+    MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx, VirtualFreeEx,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessA, CreateRemoteThread, GetExitCodeThread, OpenProcess, TerminateProcess,
-    WaitForSingleObject, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
-    STARTUPINFOA,
+    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CreateProcessA, CreateRemoteThread,
+    GetExitCodeThread, INFINITE, OpenProcess, PROCESS_INFORMATION, STARTUPINFOA, TerminateProcess,
+    WaitForSingleObject,
 };
+use windows::core::s;
+use windows::core::{PCSTR, PCWSTR};
 
 fn is_under_onedrive(path: &Path) -> bool {
     path.components().any(|component| {
@@ -197,10 +197,12 @@ pub fn start_game(
         .into());
     }
 
-    // Set Steam App ID
-    std::env::set_var("SteamAppId", ELDENRING_ID.to_string());
-    // Set Content Dir
-    std::env::set_var("DEN_CONTENT_DIR", content_dir_path);
+    unsafe {
+        // Set Steam App ID
+        std::env::set_var("SteamAppId", ELDENRING_ID.to_string());
+        // Set Content Dir
+        std::env::set_var("DEN_CONTENT_DIR", content_dir_path);
+    }
 
     // Create process
     let process_info = create_suspended_process(&executable_path)?;

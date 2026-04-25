@@ -47,11 +47,11 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(exe_dir) = current_exe.parent() {
-            tracing::debug!("Running migrations in {}", exe_dir.display());
-            migrations::run(exe_dir);
-        }
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(exe_dir) = current_exe.parent()
+    {
+        tracing::debug!("Running migrations in {}", exe_dir.display());
+        migrations::run(exe_dir);
     }
 
     if args.skip_updates {
