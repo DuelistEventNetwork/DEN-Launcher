@@ -4,7 +4,7 @@ members = ["den-signer"]
 [package]
 name = "DEN-Launcher"
 version = "2.1.0"
-edition = "2021"
+edition = "2024"
 
 [features]
 default = ["migrations"]
