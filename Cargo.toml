@@ -1,6 +1,9 @@
+[workspace]
+members = ["den-signer"]
+
 [package]
 name = "DEN-Launcher"
-version = "2.0.2+patch.1"
+version = "2.1.0"
 edition = "2021"
 
 [features]
@@ -14,18 +17,18 @@ path = "src/main.rs"
 [dependencies]
 dotenvy_macro = "0.15"
 steamlocate = "2.0.1"
-tempfile = "3.15.0"
 tracing-appender = "0.2.3"
 tracing-panic = "0.1.2"
-zip = "2.2.2"
-zipsign-api = "0.1.2"
-semver = "1.0.25"
+
 self-replace = "1.5.0"
-serde = "1.0.217"
-walkdir = "2.5.0"
+den-signer = { path = "den-signer" }
+serde = { version = "1", features = ["derive"] }
 
 [build-dependencies]
 winres = "0.1"
+
+[dev-dependencies]
+dotenvy = "0.15"
 
 [dependencies.clap]
 version = "4.5.4"

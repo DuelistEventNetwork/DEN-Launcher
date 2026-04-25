@@ -20,7 +20,13 @@ fn legacy_cleanup(exe_dir: &Path) {
             .unwrap_or(true)
     {
         std::fs::remove_file(&legacy_exe)
-            .map_err(|e| tracing::warn!("Failed to remove legacy exe at {:?}: {}", legacy_exe, e))
+            .map_err(|e| {
+                tracing::warn!(
+                    "Failed to remove legacy exe at {}: {}",
+                    legacy_exe.display(),
+                    e
+                )
+            })
             .ok();
     }
 
@@ -29,8 +35,8 @@ fn legacy_cleanup(exe_dir: &Path) {
         std::fs::remove_dir_all(&legacy_data_dir)
             .map_err(|e| {
                 tracing::warn!(
-                    "Failed to remove legacy data dir at {:?}: {}",
-                    legacy_data_dir,
+                    "Failed to remove legacy data dir at {}: {}",
+                    legacy_data_dir.display(),
                     e
                 )
             })

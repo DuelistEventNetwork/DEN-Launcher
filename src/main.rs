@@ -29,7 +29,7 @@ struct Args {
     dll_name: String,
     #[arg(long, env("DEN_GAME_EXECUTABLE"), default_value = ELDENRING_EXE)]
     game_executable: String,
-    #[arg(long, env("DEN_DEBUG"), default_value_t = cfg!(debug_assertions))]
+    #[arg(long, env("DEN_DEBUG"), default_value_t = false)]
     debug: bool,
 }
 
@@ -49,7 +49,7 @@ fn main() {
 
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(exe_dir) = current_exe.parent() {
-            tracing::info!("Running migrations in {:?}", exe_dir);
+            tracing::debug!("Running migrations in {}", exe_dir.display());
             migrations::run(exe_dir);
         }
     }
@@ -62,8 +62,6 @@ fn main() {
             &args.updater_repo_owner,
             &args.updater_repo_name,
             args.updater_repo_private_key.as_deref(),
-            &args.content_dir,
-            &args.dll_name,
         )
     }
 
@@ -75,7 +73,7 @@ fn main() {
         &args.game_executable,
         args.debug,
     ) {
-        tracing::error!("Failed to start Elden Ring: {:?}", err);
+        tracing::error!("Failed to start Elden Ring: {}", err);
         std::thread::sleep(std::time::Duration::from_secs(5));
         std::process::exit(1);
     } else {

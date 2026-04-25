@@ -1,0 +1,18 @@
+[package]
+name = "den-signer"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "den_signer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "den-signer"
+path = "src/main.rs"
+
+[dependencies]
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+rand = "0.8"
+bitcode = "0.6.7"
+clap = { version = "4", features = ["derive"] }

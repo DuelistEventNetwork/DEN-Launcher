@@ -17,14 +17,68 @@ use windows::Win32::System::Threading::{
     STARTUPINFOA,
 };
 
-fn locate_executable(game_executable: &str) -> PathBuf {
-    let steam_dir = SteamDir::locate().expect("Failed to locate Steam directory");
+fn is_under_onedrive(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .to_lowercase()
+            .contains("onedrive")
+    })
+}
+
+fn is_under_tmp(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .to_lowercase()
+            .eq("temp")
+    })
+}
+
+const COMMON_PROXY_DLLS: &[&str] = &[
+    "dinput8.dll",
+    "dxgi.dll",
+    "d3d9.dll",
+    "d3d11.dll",
+    "d3d12.dll",
+    "xinput1_3.dll",
+    "xinput1_4.dll",
+    "d3dx9_43.dll",
+    "d3dx11_43.dll",
+    "winhttp.dll",
+];
+
+fn is_steam_running() -> bool {
+    !get_pids_by_name("steam.exe").is_empty()
+}
+
+fn locate_executable(game_executable: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let steam_dir = SteamDir::locate().map_err(|_| {
+        "Steam installation not found. Please install Steam and make sure it is available on this machine."
+    })?;
+
     let (app, lib) = steam_dir
         .find_app(ELDENRING_ID)
         .ok()
         .flatten()
-        .expect("Failed to locate Elden Ring, please ensure it is installed via Steam");
-    lib.resolve_app_dir(&app).join("Game").join(game_executable)
+        .ok_or("Elden Ring was not found in your Steam library. Please verify the game is installed and Steam has the correct library path.")?;
+
+    let game_path = lib.resolve_app_dir(&app).join("Game").join(game_executable);
+    if !game_path.exists() {
+        return Err("Elden Ring executable could not be found in the Steam game directory. Verify the game installation and that Steam is not running from an unsupported location.".into());
+    }
+
+    Ok(game_path)
+}
+
+fn find_common_proxy_dlls(dir: &Path) -> Vec<String> {
+    COMMON_PROXY_DLLS
+        .iter()
+        .filter(|name| dir.join(name).exists())
+        .map(|name| name.to_string())
+        .collect()
 }
 
 fn open_process_by_pid(pid: u32) -> Option<HANDLE> {
@@ -45,7 +99,12 @@ pub fn get_pids_by_name(name: &str) -> Vec<u32> {
     system
         .processes()
         .values()
-        .filter(move |process| process.name().to_str().is_some_and(|n| n.contains(name)))
+        .filter(move |process| {
+            process
+                .name()
+                .to_str()
+                .is_some_and(|n| n.to_lowercase().contains(name))
+        })
         .map(|process| process.pid().as_u32())
         .collect()
 }
@@ -56,6 +115,10 @@ pub fn start_game(
     game_executable: &str,
     debug: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !is_steam_running() {
+        return Err("Steam does not appear to be running. Start Steam before launching Better Multiplayer Launcher.".into());
+    }
+
     // Kill existing processes
     for pid in get_pids_by_name(game_executable) {
         if debug {
@@ -69,23 +132,75 @@ pub fn start_game(
     }
 
     // Setup paths
-    let executable_path = locate_executable(game_executable);
+    let executable_path = locate_executable(game_executable)?;
+    let game_folder = executable_path
+        .parent()
+        .ok_or("Failed to get game executable parent directory")?;
+    tracing::info!("Located game executable at {}", executable_path.display());
     let current_exe = std::env::current_exe()?;
     let parent_dir = current_exe
         .parent()
         .ok_or("Failed to get current executable dir path")?;
-    let dll_path = parent_dir.join(content_dir).join(dll_name);
 
-    tracing::info!("Injecting DLL: {:?}", dll_path);
+    if is_under_onedrive(parent_dir) {
+        return Err(format!(
+            "The launcher is running from a OneDrive-managed folder \"{}\", which can interfere with launcher operations. \
+            Please move the launcher and BMPData folder to a local directory outside OneDrive.",
+            parent_dir.display()
+        ).into());
+    }
+
+    if is_under_tmp(parent_dir) {
+        return Err(format!(
+            "The launcher is running from a temporary folder \"{}\", which can interfere with launcher operations. \
+            This usually means the release ZIP was not fully extracted and the launcher is being run directly from the ZIP. \
+            Unpack the entire archive to a local directory and run the launcher from there.",
+            parent_dir.display()
+        ).into());
+    }
+
+    let content_dir_path = parent_dir.join(content_dir);
+    if !content_dir_path.exists() {
+        return Err(format!(
+            "The content directory \"{}\" does not exist. This usually means the release ZIP was not fully extracted. Unpack the entire archive, not just the launcher executable.",
+            content_dir_path.display()
+        )
+        .into());
+    }
+
+    if !debug {
+        let proxy_dlls = find_common_proxy_dlls(game_folder);
+        if !proxy_dlls.is_empty() {
+            tracing::error!(
+                "Found suspicious DLL files in the game folder:\n\t - {}",
+                proxy_dlls.join("\n\t - ")
+            );
+            tracing::error!(
+                "Better Multiplayer is not compatible with mod loaders, and using mods can lead you to being banned from the Better Multiplayer server."
+            );
+            tracing::error!(
+                "Please remove the above files from the game folder \"{}\" before launching.",
+                game_folder.display()
+            );
+            return Err("Suspicious DLL files found in game folder".into());
+        }
+    }
+
+    let dll_path = content_dir_path.join(dll_name);
+    tracing::info!("Injecting DLL: {}", dll_path.display());
 
     if !dll_path.exists() {
-        return Err("DLL not found".into());
+        return Err(format!(
+            "DLL not found at {}. Make sure all files were unpacked from the release archive, not just the launcher executable.",
+            dll_path.display()
+        )
+        .into());
     }
 
     // Set Steam App ID
     std::env::set_var("SteamAppId", ELDENRING_ID.to_string());
     // Set Content Dir
-    std::env::set_var("DEN_CONTENT_DIR", parent_dir.join(content_dir));
+    std::env::set_var("DEN_CONTENT_DIR", content_dir_path);
 
     // Create process
     let process_info = create_suspended_process(&executable_path)?;

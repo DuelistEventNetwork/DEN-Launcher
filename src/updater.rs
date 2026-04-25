@@ -1,288 +1,226 @@
-use std::{
-    convert::TryInto,
-    io::{Read, Seek, Write},
-};
+use std::{io::Read, path::Path};
 
 use crate::{
     constants::ELDENRING_EXE,
     injector::{get_pids_by_name, kill_process},
 };
 
-use semver::Version;
+use den_signer::{ReleaseManifest, VerifyingKey};
 use serde::Deserialize;
-use walkdir::WalkDir;
-use zip::ZipArchive;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RELEASE_PUBLIC_KEY: &[u8] = include_bytes!("../release_public_key.bin");
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize)]
 struct ReleaseAsset {
     pub url: String,
     pub name: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize)]
 struct Release {
     pub tag_name: String,
     pub assets: Vec<ReleaseAsset>,
 }
 
-pub fn bump_is_greater(current: &str, other: &str) -> Option<bool> {
-    Some(Version::parse(other).ok()? > Version::parse(current).ok()?)
+fn get_verifying_key() -> VerifyingKey {
+    let arr: [u8; 32] = RELEASE_PUBLIC_KEY
+        .try_into()
+        .expect("release_public_key.bin must be exactly 32 bytes");
+    VerifyingKey::from_bytes(&arr).expect("release_public_key.bin is not a valid ed25519 key")
 }
 
-fn get_update(
-    repo_owner: &str,
-    repo_name: &str,
-    repo_private_key: Option<&str>,
-) -> Option<Release> {
-    let mut request = ureq::get(&format!(
-        "https://api.github.com/repos/{}/{}/releases",
-        repo_owner, repo_name
-    ))
-    .set("User-Agent", &format!("denlauncher/{}", VERSION))
-    .query("per_page", "20");
-
-    if let Some(token) = repo_private_key {
-        request = request.set("Authorization", &format!("token {}", token));
+fn make_request(url: &str, token: Option<&str>) -> ureq::Request {
+    let mut req = ureq::get(url).set("User-Agent", &format!("denlauncher/{VERSION}"));
+    if let Some(t) = token {
+        req = req.set("Authorization", &format!("token {t}"));
     }
-
-    let response = request
-        .call()
-        .map_err(|e| {
-            tracing::error!("Failed to fetch releases: {}", e);
-            e
-        })
-        .ok()?
-        .into_json::<Vec<Release>>()
-        .map_err(|e| {
-            tracing::error!("Failed to parse JSON: {}", e);
-            e
-        })
-        .ok()?;
-
-    response
-        .into_iter()
-        .find(|r| bump_is_greater(VERSION, r.tag_name.trim_start_matches("v")).unwrap_or(false))
+    req
 }
 
-// #[cfg(not(debug_assertions))]
-fn verify_signature(
-    archive: &mut std::fs::File,
-    context: &[u8],
-    keys: &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]],
-) -> Result<(), zipsign_api::ZipsignError> {
-    if keys.is_empty() {
+fn download_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    make_request(url, token)
+        .set("Accept", "application/octet-stream")
+        .call()
+        .map_err(|e| format!("Failed to download {url}: {e}"))?
+        .into_reader()
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("Failed to read download for {url}: {e}"))?;
+    Ok(buf)
+}
+
+fn get_latest_release(repo_owner: &str, repo_name: &str, token: Option<&str>) -> Option<Release> {
+    make_request(
+        &format!("https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"),
+        token,
+    )
+    .set("Accept", "application/vnd.github+json")
+    .call()
+    .map_err(|e| tracing::error!("Failed to fetch release: {e}"))
+    .ok()?
+    .into_json::<Release>()
+    .map_err(|e| tracing::error!("Failed to parse release JSON: {e}"))
+    .ok()
+}
+
+fn apply_manifest(
+    manifest: &ReleaseManifest,
+    release: &Release,
+    exe_dir: &Path,
+    token: Option<&str>,
+    key: &VerifyingKey,
+) -> Result<(), String> {
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+
+    // Collect files that need (re-)downloading.
+    let to_update: Vec<&den_signer::ManifestFile> = manifest
+        .inner
+        .files
+        .iter()
+        .filter(|mf| {
+            let target = exe_dir.join(&mf.install_path);
+            match std::fs::read(&target) {
+                Ok(data) if mf.verify(&data, key).is_ok() => {
+                    tracing::info!("{} is up to date", mf.name);
+                    false
+                }
+                Ok(_) => {
+                    tracing::info!("{} signature mismatch; queuing for update", mf.name);
+                    true
+                }
+                Err(_) => {
+                    tracing::info!("{} not found locally; queuing for download", mf.name);
+                    true
+                }
+            }
+        })
+        .collect();
+
+    if to_update.is_empty() {
+        tracing::info!("All files are already up to date");
         return Ok(());
     }
 
-    tracing::info!("Verifying signature of update archive");
+    let mut pending = Vec::new();
+    for mf in to_update {
+        let asset = release
+            .assets
+            .iter()
+            .find(|a| a.name == mf.name)
+            .ok_or_else(|| format!("Asset '{}' not found in release", mf.name))?;
 
-    let keys = keys.iter().copied().map(Ok);
-    let keys = zipsign_api::verify::collect_keys(keys).map_err(zipsign_api::ZipsignError::from)?;
+        tracing::info!("Downloading {}", mf.name);
+        let data = download_bytes(&asset.url, token)?;
+        mf.verify(&data, key)?;
+        tracing::info!("{} signature OK", mf.name);
 
-    zipsign_api::verify::verify_zip(archive, &keys, Some(context))
-        .map_err(zipsign_api::ZipsignError::from)?;
-    Ok(())
-}
+        let target = ReleaseManifest::safe_join(exe_dir, &mf.install_path)
+            .ok_or_else(|| format!("Unsafe install_path in manifest: {}", mf.install_path))?;
 
-fn update_from_asset(
-    asset: &ReleaseAsset,
-    content_dir: &str,
-    dll_name: &str,
-    repo_private_key: Option<&str>,
-) {
+        pending.push((mf, data, target));
+    }
+
     for pid in get_pids_by_name(ELDENRING_EXE) {
         kill_process(pid);
     }
 
-    let (exe_dir, content_dir, dll_path) = get_paths(content_dir, dll_name);
-    let (mut tmp_archive, tmp_dir) = download_asset(asset, repo_private_key);
-    remove_old_content(&content_dir, &dll_path);
-    extract_archive(&mut tmp_archive, &tmp_dir);
-    perform_binary_replacement(&tmp_dir, exe_dir);
-}
-
-fn get_paths(
-    content_dir: &str,
-    dll_name: &str,
-) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-    let current_exe = std::env::current_exe().unwrap();
-    let exe_dir = current_exe.parent().unwrap().to_path_buf();
-    let content_dir = exe_dir.join(content_dir);
-    let dll_path = content_dir.join(dll_name);
-    (exe_dir, content_dir, dll_path)
-}
-
-fn download_asset(
-    asset: &ReleaseAsset,
-    repo_private_key: Option<&str>,
-) -> (std::fs::File, tempfile::TempDir) {
-    let tmp_archive_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
-    let mut tmp_archive_file = tempfile::tempfile().expect("Failed to create temp file");
-
-    tracing::info!("Downloading archive: {}", asset.url);
-
-    let mut request = ureq::get(&asset.url)
-        .set(
-            "User-Agent",
-            &format!("denlauncher/{}", env!("CARGO_PKG_VERSION")),
-        )
-        .set("Accept", "application/octet-stream");
-    if let Some(token) = repo_private_key {
-        request = request.set("Authorization", &format!("token {}", token));
-    }
-    let mut buf = Vec::new();
-    let response = request.call().expect("Failed to download archive");
-
-    if response.status() != 200 {
-        panic!("Failed to download archive: HTTP {}", response.status());
-    }
-
-    response
-        .into_reader()
-        .read_to_end(&mut buf)
-        .expect("Failed to read archive content");
-
-    tmp_archive_file
-        .write_all(&buf)
-        .expect("Failed to write to temp file");
-
-    // Rewind the file cursor to the beginning before verifying the signature
-    tmp_archive_file
-        .seek(std::io::SeekFrom::Start(0))
-        .expect("Failed to seek to start of temp file");
-
-    tracing::info!("Downloaded archive: {:?}", tmp_archive_file);
-
-    let mut public_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]> = Vec::new();
-    match RELEASE_PUBLIC_KEY.try_into() {
-        Ok(key) => public_keys.push(key),
-        Err(_) =>
-        {
-            #[allow(clippy::const_is_empty)]
-            if !RELEASE_PUBLIC_KEY.is_empty() {
-                tracing::warn!(
-                    "release_public_key.bin has unexpected size ({} bytes); signature verification disabled",
-                    RELEASE_PUBLIC_KEY.len()
-                );
+    let mut self_replaced = false;
+    for (mf, data, target) in pending {
+        if target == current_exe {
+            let tmp_path = exe_dir.join(format!("_update_{}.tmp", mf.name));
+            std::fs::write(&tmp_path, &data)
+                .map_err(|e| format!("Failed to write launcher update temp file: {e}"))?;
+            self_replace::self_replace(&tmp_path)
+                .map_err(|e| format!("Failed to self-replace launcher: {e}"))?;
+            let _ = std::fs::remove_file(&tmp_path);
+            tracing::info!("Launcher queued for replacement");
+            self_replaced = true;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!(
+                        "Failed to create target directory {}: {e}",
+                        parent.display()
+                    )
+                })?;
             }
+            std::fs::write(&target, &data)
+                .map_err(|e| format!("Failed to write updated file {}: {e}", target.display()))?;
+            tracing::info!("Updated {}", target.display());
         }
     }
 
-    verify_signature(&mut tmp_archive_file, asset.name.as_bytes(), &public_keys)
-        .expect("Failed to verify update archive signature");
-
-    tmp_archive_file
-        .seek(std::io::SeekFrom::Start(0))
-        .expect("Failed to seek to start of verified temp file");
-
-    (tmp_archive_file, tmp_archive_dir)
-}
-
-fn extract_archive(tmp_archive: &mut std::fs::File, temp_dir: &tempfile::TempDir) {
-    tracing::debug!("Extracting archive to: {:?}", tmp_archive);
-
-    tmp_archive
-        .seek(std::io::SeekFrom::Start(0))
-        .expect("Failed to seek to start of archive before extraction");
-
-    ZipArchive::new(tmp_archive)
-        .expect("Failed to open archive")
-        .extract(temp_dir)
-        .expect("Failed to extract archive");
-}
-
-fn remove_old_content(content_dir: &std::path::Path, dll_path: &std::path::Path) {
-    tracing::info!("Removing old content");
-
-    std::fs::remove_file(dll_path)
-        .map_err(|e| tracing::warn!("Failed to remove old DLL at {:?}: {}", dll_path, e))
-        .ok();
-
-    let content_is_empty = std::fs::read_dir(content_dir)
-        .map(|mut dir| dir.next().is_none())
-        .unwrap_or(false);
-    if content_is_empty {
-        std::fs::remove_dir(content_dir)
-            .map_err(|e| {
-                tracing::warn!(
-                    "Failed to remove old content dir at {:?}: {}",
-                    content_dir,
-                    e
-                )
-            })
-            .ok();
-    }
-}
-
-fn perform_binary_replacement(tmp_dir: &tempfile::TempDir, exe_dir: std::path::PathBuf) {
-    let mut new_exe_path: Option<std::path::PathBuf> = None;
-
-    for entry in WalkDir::new(tmp_dir).into_iter().filter_map(Result::ok) {
-        let path = entry.path();
-        let relative_path = path.strip_prefix(tmp_dir).expect("Failed to strip prefix");
-        let target_path = exe_dir.join(relative_path);
-
-        if entry.file_type().is_file() {
-            if let Some(path) = handle_file_entry(entry, &target_path) {
-                new_exe_path = Some(path);
-            }
-        } else if entry.file_type().is_dir() {
-            std::fs::create_dir_all(&target_path).expect("Failed to create directory");
-        }
-    }
-
-    if let Some(new_exe_path) = new_exe_path {
-        tracing::info!("Replacing binary with new version");
-        self_replace::self_replace(new_exe_path).expect("Failed to replace binary");
-    } else {
-        self_replace::self_delete().expect("Failed to delete updater");
-    }
-}
-
-fn handle_file_entry(
-    entry: walkdir::DirEntry,
-    target_path: &std::path::PathBuf,
-) -> Option<std::path::PathBuf> {
-    // returns path if it's the current exe, otherwise copies the file
-    if entry.file_name()
-        == std::env::current_exe()
-            .expect("Failed to get current exe name")
-            .file_name()
-            .unwrap()
-    {
-        Some(entry.path().to_path_buf())
-    } else {
-        std::fs::copy(entry.path(), target_path).expect("Failed to copy file");
-        None
-    }
-}
-
-pub fn start_updater(
-    repo_owner: &str,
-    repo_name: &str,
-    repo_private_key: Option<&str>,
-    content_dir: &str,
-    dll_name: &str,
-) {
-    if let Some(release) = get_update(repo_owner, repo_name, repo_private_key) {
-        tracing::info!(
-            "Found new release: {}",
-            release.tag_name.trim_start_matches("v")
-        );
-
-        if let Some(asset) = release
-            .assets
-            .iter()
-            .find(|asset| asset.name.ends_with(".zip"))
-        {
-            update_from_asset(asset, content_dir, dll_name, repo_private_key);
-        }
-        tracing::info!("Update complete, please restart the launcher");
+    if self_replaced {
+        tracing::warn!("Launcher was updated; please restart to apply changes");
         std::thread::sleep(std::time::Duration::from_secs(5));
         std::process::exit(0);
+    }
+
+    tracing::info!("Update complete");
+    Ok(())
+}
+
+pub fn start_updater(repo_owner: &str, repo_name: &str, token: Option<&str>) {
+    let Some(release) = get_latest_release(repo_owner, repo_name, token) else {
+        tracing::warn!("Failed to fetch latest release info");
+        return;
+    };
+
+    let Some(manifest_asset) = release.assets.iter().find(|a| a.name == "manifest.bin") else {
+        tracing::warn!("No manifest.bin in release assets; skipping update");
+        return;
+    };
+
+    tracing::info!(
+        "Checking release {} for updates",
+        release.tag_name.trim_start_matches('v')
+    );
+    let manifest_bytes = match download_bytes(&manifest_asset.url, token) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::error!("Failed to download manifest.bin: {}", err);
+            return;
+        }
+    };
+    let manifest = match ReleaseManifest::decode(&manifest_bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!("Failed to decode manifest: {e}");
+            return;
+        }
+    };
+
+    let verifying_key = get_verifying_key();
+
+    if let Err(e) = manifest.validate() {
+        tracing::error!("Manifest validation failed: {e}");
+        return;
+    }
+
+    if let Err(e) = manifest.verify(&verifying_key) {
+        tracing::error!("Manifest signature invalid: {e}");
+        return;
+    }
+
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::error!("Failed to get current exe: {}", err);
+            return;
+        }
+    };
+    let exe_dir = match current_exe.parent() {
+        Some(dir) => dir,
+        None => {
+            tracing::error!("Failed to get exe dir");
+            return;
+        }
+    };
+
+    if let Err(err) = apply_manifest(&manifest, &release, exe_dir, token, &verifying_key) {
+        tracing::error!("Update failed: {}", err);
     }
 }
 
@@ -291,20 +229,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bump_is_greater() {
-        assert_eq!(bump_is_greater("1.0.0", "1.0.1"), Some(true));
-        assert_eq!(bump_is_greater("1.0.1", "1.0.0"), Some(false));
-        assert_eq!(bump_is_greater("1.0.0", "1.0.0"), Some(false));
-        assert_eq!(bump_is_greater("1.0.0", "invalid"), None);
-        assert_eq!(bump_is_greater("invalid", "1.0.0"), None);
-        assert_eq!(
-            bump_is_greater("2.0.0-beta.10", "2.0.0-beta.9"),
-            Some(false)
+    fn test_fetch_and_verify_real_manifest() {
+        let _ = dotenvy::dotenv_override(); // ignore error when .env is absent
+
+        let owner = match std::env::var("DEN_REPO_OWNER") {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("DEN_REPO_OWNER not set, skipping online manifest test");
+                return;
+            }
+        };
+        let name = match std::env::var("DEN_REPO_NAME") {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("DEN_REPO_NAME not set skipping online manifest test");
+                return;
+            }
+        };
+        let token = std::env::var("DEN_REPO_TOKEN").ok();
+        assert!(
+            !owner.is_empty() && !name.is_empty(),
+            "DEN_REPO_OWNER and DEN_REPO_NAME must be set for this test"
         );
-        assert_eq!(bump_is_greater("2.0.0-beta9", "2.0.0-beta.10"), Some(false));
-        assert_eq!(
-            bump_is_greater("2.0.0-rc.1", "2.0.0-rc.1+patch.1"),
-            Some(true)
+
+        let release = match get_latest_release(&owner, &name, token.as_deref()) {
+            Some(r) => r,
+            None => {
+                eprintln!("Failed to fetch release - skipping online manifest test");
+                return;
+            }
+        };
+
+        let manifest_asset = release
+            .assets
+            .iter()
+            .find(|a| a.name == "manifest.bin")
+            .expect("manifest.bin not found in release assets");
+
+        let bytes = download_bytes(&manifest_asset.url, token.as_deref())
+            .expect("failed to download manifest.bin");
+        let manifest = ReleaseManifest::decode(&bytes).expect("failed to decode manifest");
+
+        let key = get_verifying_key();
+        manifest.validate().expect("manifest validation failed");
+        manifest.verify(&key).expect("manifest signature invalid");
+
+        assert!(
+            !manifest.inner.version.is_empty(),
+            "version must not be empty"
+        );
+        assert!(
+            !manifest.inner.files.is_empty(),
+            "manifest must list at least one file"
+        );
+        for mf in &manifest.inner.files {
+            assert!(!mf.name.is_empty(), "file name must not be empty");
+            assert!(
+                !mf.install_path.is_empty(),
+                "install_path must not be empty"
+            );
+        }
+
+        eprintln!(
+            "OK  manifest v{}  ({} file(s))",
+            manifest.inner.version,
+            manifest.inner.files.len()
         );
     }
 }
