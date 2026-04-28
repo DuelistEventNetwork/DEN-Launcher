@@ -1,78 +1,89 @@
+mod signer_error;
+pub use signer_error::SignerError;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub use ed25519_dalek::VerifyingKey;
 use ed25519_dalek::{Signature, Verifier};
 
+pub type Result<T> = std::result::Result<T, SignerError>;
+
 #[derive(bitcode::Encode, bitcode::Decode)]
 pub struct ManifestFile {
     pub name: String,
     pub install_path: String,
-    /// ed25519 signature of the raw file bytes (64 bytes).
     pub sig: [u8; 64],
 }
 
 #[derive(bitcode::Encode, bitcode::Decode)]
-pub struct ManifestInner {
+pub struct ManifestV1 {
     pub version: String,
     pub files: Vec<ManifestFile>,
 }
 
+pub type ManifestInner = ManifestV1;
+
+#[derive(bitcode::Encode, bitcode::Decode)]
+pub struct OpaquePayload(Vec<u8>);
+
+impl OpaquePayload {
+    pub fn encode_from<T: bitcode::Encode>(val: &T) -> Self {
+        Self(bitcode::encode(val))
+    }
+
+    pub fn decode_as<T: for<'a> bitcode::Decode<'a>>(&self) -> Result<T> {
+        bitcode::decode(&self.0).map_err(|e| SignerError::Bitcode(e.to_string()))
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 #[derive(bitcode::Encode, bitcode::Decode)]
 pub struct ReleaseManifest {
-    pub inner: ManifestInner,
-    /// ed25519 signature of `bitcode::encode(&inner)` (64 bytes).
+    pub format_version: u32,
+    pub payload: OpaquePayload,
     pub sig: [u8; 64],
 }
 
 impl ManifestFile {
-    pub fn verify(&self, data: &[u8], key: &VerifyingKey) -> Result<(), String> {
+    pub fn verify(&self, data: &[u8], key: &VerifyingKey) -> Result<()> {
         let sig = Signature::from_bytes(&self.sig);
-        key.verify(data, &sig)
-            .map_err(|_| format!("File signature verification failed for {}", self.name))
+        key.verify(data, &sig).map_err(|_| {
+            SignerError::Signature(format!(
+                "File signature verification failed for {}",
+                self.name
+            ))
+        })
     }
 }
 
 impl ReleaseManifest {
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        bitcode::decode(bytes).map_err(|e| format!("Failed to decode manifest: {e}"))
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        bitcode::decode(bytes).map_err(|e| SignerError::Bitcode(e.to_string()))
     }
 
-    pub fn verify(&self, key: &VerifyingKey) -> Result<(), String> {
-        let inner_bytes = bitcode::encode(&self.inner);
+    pub fn verify(&self, key: &VerifyingKey) -> Result<()> {
         let sig = Signature::from_bytes(&self.sig);
-        key.verify(&inner_bytes, &sig)
-            .map_err(|_| "Manifest signature verification failed".to_string())
+        key.verify(self.payload.bytes(), &sig).map_err(|_| {
+            SignerError::Signature("Manifest signature verification failed".to_string())
+        })
     }
 
-    pub fn validate(&self) -> Result<(), String> {
-        let mut install_path_set = HashSet::new();
-        let mut asset_name_set = HashSet::new();
-
-        for mf in &self.inner.files {
-            if !Self::is_safe_asset_name(&mf.name) {
-                return Err(format!("Unsafe asset name in manifest: {}", mf.name));
-            }
-
-            if !Self::is_safe_install_path(&mf.install_path) {
-                return Err(format!(
-                    "Unsafe install path in manifest: {}",
-                    mf.install_path
-                ));
-            }
-
-            if !install_path_set.insert(&mf.install_path) {
-                return Err(format!(
-                    "Duplicate install path in manifest: {}",
-                    mf.install_path
-                ));
-            }
-
-            if !asset_name_set.insert(&mf.name) {
-                return Err(format!("Duplicate asset name in manifest: {}", mf.name));
-            }
+    pub fn decode_inner(&self) -> Result<ManifestInner> {
+        match self.format_version {
+            1 => self.payload.decode_as::<ManifestInner>(),
+            v => Err(SignerError::Validation(format!(
+                "Unsupported manifest format version v{v}. Please update your launcher."
+            ))),
         }
-        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let inner = self.decode_inner()?;
+        inner.validate()
     }
 
     pub fn safe_join(base: &Path, relative: &str) -> Option<PathBuf> {
@@ -150,6 +161,44 @@ impl ReleaseManifest {
     }
 }
 
+impl ManifestInner {
+    pub fn validate(&self) -> Result<()> {
+        let mut install_path_set = HashSet::new();
+        let mut asset_name_set = HashSet::new();
+
+        for mf in &self.files {
+            if !ReleaseManifest::is_safe_asset_name(&mf.name) {
+                return Err(SignerError::Validation(format!(
+                    "Unsafe asset name in manifest: {}",
+                    mf.name
+                )));
+            }
+
+            if !ReleaseManifest::is_safe_install_path(&mf.install_path) {
+                return Err(SignerError::Validation(format!(
+                    "Unsafe install path in manifest: {}",
+                    mf.install_path
+                )));
+            }
+
+            if !install_path_set.insert(&mf.install_path) {
+                return Err(SignerError::Validation(format!(
+                    "Duplicate install path in manifest: {}",
+                    mf.install_path
+                )));
+            }
+
+            if !asset_name_set.insert(&mf.name) {
+                return Err(SignerError::Validation(format!(
+                    "Duplicate asset name in manifest: {}",
+                    mf.name
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,7 +209,7 @@ mod tests {
         let manifest_files = files
             .iter()
             .map(|(name, data)| {
-                let sig: ed25519_dalek::Signature = key.sign(data);
+                let sig = key.sign(data);
                 ManifestFile {
                     name: name.to_string(),
                     install_path: name.to_string(),
@@ -173,10 +222,13 @@ mod tests {
             version: version.to_string(),
             files: manifest_files,
         };
-        let inner_bytes = bitcode::encode(&inner);
-        let sig: ed25519_dalek::Signature = key.sign(&inner_bytes);
+
+        let payload = OpaquePayload::encode_from(&inner);
+        let sig = key.sign(payload.bytes());
+
         ReleaseManifest {
-            inner,
+            format_version: 1,
+            payload,
             sig: sig.to_bytes(),
         }
     }
@@ -186,9 +238,10 @@ mod tests {
         let key = SigningKey::generate(&mut OsRng);
         let manifest = build_manifest(&key, "1.2.3", &[("foo.dll", b"fake dll bytes")]);
         let decoded = ReleaseManifest::decode(&bitcode::encode(&manifest)).unwrap();
-        assert_eq!(decoded.inner.version, "1.2.3");
-        assert_eq!(decoded.inner.files.len(), 1);
-        assert_eq!(decoded.inner.files[0].name, "foo.dll");
+        let inner = decoded.decode_inner().unwrap();
+        assert_eq!(inner.version, "1.2.3");
+        assert_eq!(inner.files.len(), 1);
+        assert_eq!(inner.files[0].name, "foo.dll");
     }
 
     #[test]
@@ -207,7 +260,9 @@ mod tests {
     fn test_verify_manifest_tampered_version() {
         let key = SigningKey::generate(&mut OsRng);
         let mut manifest = build_manifest(&key, "1.0.0", &[("a.dll", b"data")]);
-        manifest.inner.version = "9.9.9".to_string();
+        let mut inner = manifest.decode_inner().unwrap();
+        inner.version = "9.9.9".to_string();
+        manifest.payload = OpaquePayload::encode_from(&inner);
         assert!(manifest.verify(&key.verifying_key()).is_err());
     }
 
@@ -227,17 +282,17 @@ mod tests {
         let key = SigningKey::generate(&mut OsRng);
         let data = b"file contents";
         let manifest = build_manifest(&key, "1.0.0", &[("f.dll", data)]);
-        manifest.inner.files[0]
-            .verify(data, &key.verifying_key())
-            .unwrap();
+        let inner = manifest.decode_inner().unwrap();
+        inner.files[0].verify(data, &key.verifying_key()).unwrap();
     }
 
     #[test]
     fn test_verify_file_tampered_data() {
         let key = SigningKey::generate(&mut OsRng);
         let manifest = build_manifest(&key, "1.0.0", &[("f.dll", b"original")]);
+        let inner = manifest.decode_inner().unwrap();
         assert!(
-            manifest.inner.files[0]
+            inner.files[0]
                 .verify(b"tampered", &key.verifying_key())
                 .is_err()
         );
@@ -248,8 +303,9 @@ mod tests {
         let key = SigningKey::generate(&mut OsRng);
         let data = b"file contents";
         let manifest = build_manifest(&key, "1.0.0", &[("f.dll", data)]);
+        let inner = manifest.decode_inner().unwrap();
         assert!(
-            manifest.inner.files[0]
+            inner.files[0]
                 .verify(data, &SigningKey::generate(&mut OsRng).verifying_key())
                 .is_err()
         );
@@ -265,12 +321,11 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_path_traversal() {
-        let mut manifest = build_manifest(
-            &SigningKey::generate(&mut OsRng),
-            "1.0.0",
-            &[("a.dll", b"data")],
-        );
-        manifest.inner.files[0].install_path = "../evil.dll".into();
+        let key = SigningKey::generate(&mut OsRng);
+        let mut manifest = build_manifest(&key, "1.0.0", &[("a.dll", b"data")]);
+        let mut inner = manifest.decode_inner().unwrap();
+        inner.files[0].install_path = "../evil.dll".into();
+        manifest.payload = OpaquePayload::encode_from(&inner);
         assert!(manifest.validate().is_err());
     }
 
@@ -278,7 +333,9 @@ mod tests {
     fn test_validate_rejects_duplicate_install_paths() {
         let key = SigningKey::generate(&mut OsRng);
         let mut manifest = build_manifest(&key, "1.0.0", &[("a.dll", b"data"), ("b.dll", b"data")]);
-        manifest.inner.files[1].install_path = "a.dll".into();
+        let mut inner = manifest.decode_inner().unwrap();
+        inner.files[1].install_path = "a.dll".into();
+        manifest.payload = OpaquePayload::encode_from(&inner);
         assert!(manifest.validate().is_err());
     }
 

@@ -1,15 +1,21 @@
 mod constants;
 mod injector;
+mod launcher_error;
 mod logging;
 mod migrations;
 mod updater;
 
+use std::path::PathBuf;
+
 use clap::Parser;
 use constants::ELDENRING_EXE;
+use den_signer::VerifyingKey;
 use dotenvy_macro::dotenv;
 use injector::start_game;
 use logging::{den_panic_hook, enable_ansi_support, setup_logging};
 use updater::start_updater;
+
+use crate::constants::RELEASE_PUBLIC_KEY;
 
 #[derive(Parser)]
 #[command(name = "DenLauncher")]
@@ -24,13 +30,17 @@ struct Args {
     #[arg(long)]
     updater_repo_private_key: Option<String>,
     #[arg(long, env("DEN_CONTENT_DIR"), default_value = dotenv!("DEN_CONTENT_DIR"))]
-    content_dir: String,
+    content_dir: PathBuf,
     #[arg(long, env("DEN_DLL_NAME"), default_value = dotenv!("DEN_DLL_NAME"))]
     dll_name: String,
     #[arg(long, env("DEN_GAME_EXECUTABLE"), default_value = ELDENRING_EXE)]
     game_executable: String,
     #[arg(long, env("DEN_DEBUG"), default_value_t = false)]
     debug: bool,
+}
+
+fn get_verifying_key(bytes: &[u8; 32]) -> VerifyingKey {
+    VerifyingKey::from_bytes(bytes).expect("release_public_key.bin is not a valid ed25519 key")
 }
 
 fn main() {
@@ -47,23 +57,33 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(exe_dir) = current_exe.parent()
-    {
-        tracing::debug!("Running migrations in {}", exe_dir.display());
-        migrations::run(exe_dir);
-    }
+    let current_exe = std::env::current_exe().expect("Failed to get current exe path");
+    let exe_dir = current_exe
+        .parent()
+        .expect("Failed to get current exe dir")
+        .to_path_buf();
 
-    if args.skip_updates {
+    tracing::debug!("Running migrations in {}", exe_dir.display());
+    migrations::run(&exe_dir);
+
+    let _ = if args.skip_updates {
         tracing::info!("--skip-updates flag passed, skipping update check.");
+        None
     } else {
         tracing::info!("Checking for updates...");
-        start_updater(
+        match start_updater(
             &args.updater_repo_owner,
             &args.updater_repo_name,
             args.updater_repo_private_key.as_deref(),
-        )
-    }
+            &get_verifying_key(RELEASE_PUBLIC_KEY),
+        ) {
+            Ok(opt) => opt,
+            Err(err) => {
+                tracing::error!("Updater failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    };
 
     tracing::info!("Starting Elden Ring...");
 

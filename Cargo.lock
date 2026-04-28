@@ -12,8 +12,10 @@ dependencies = [
  "dotenvy_macro",
  "self-replace",
  "serde",
+ "serde_json",
  "steamlocate",
  "sysinfo",
+ "thiserror",
  "tracing",
  "tracing-appender",
  "tracing-panic",
@@ -347,6 +349,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "rand",
+ "thiserror",
 ]
 
 [[package]]

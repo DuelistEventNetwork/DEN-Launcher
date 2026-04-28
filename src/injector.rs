@@ -1,6 +1,8 @@
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
 use crate::constants::{ELDENRING_ID, PROCESS_INJECTION_ACCESS};
+use crate::launcher_error::LauncherError;
+
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use steamlocate::SteamDir;
@@ -54,20 +56,28 @@ fn is_steam_running() -> bool {
     !get_pids_by_name("steam.exe").is_empty()
 }
 
-fn locate_executable(game_executable: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn locate_executable(game_executable: &str) -> Result<PathBuf, LauncherError> {
     let steam_dir = SteamDir::locate().map_err(|_| {
-        "Steam installation not found. Please install Steam and make sure it is available on this machine."
+        LauncherError::SteamNotFound(
+            "Please install Steam and make sure it is available on this machine.".into(),
+        )
     })?;
 
     let (app, lib) = steam_dir
         .find_app(ELDENRING_ID)
         .ok()
         .flatten()
-        .ok_or("Elden Ring was not found in your Steam library. Please verify the game is installed and Steam has the correct library path.")?;
+        .ok_or_else(|| {
+            LauncherError::GameNotFound(
+                "Elden Ring was not found in your Steam library. Please verify the game is installed and Steam has the correct library path.".into()
+            )
+        })?;
 
     let game_path = lib.resolve_app_dir(&app).join("Game").join(game_executable);
     if !game_path.exists() {
-        return Err("Elden Ring executable could not be found in the Steam game directory. Verify the game installation and that Steam is not running from an unsupported location.".into());
+        return Err(
+            LauncherError::GameNotFound("Elden Ring executable could not be found in the Steam game directory. Verify the game installation and that Steam is not running from an unsupported location.".into())
+        );
     }
 
     Ok(game_path)
@@ -110,11 +120,11 @@ pub fn get_pids_by_name(name: &str) -> Vec<u32> {
 }
 
 pub fn start_game(
-    content_dir: &str,
+    content_dir: &PathBuf,
     dll_name: &str,
     game_executable: &str,
     debug: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), LauncherError> {
     if !is_steam_running() {
         return Err("Steam does not appear to be running. Start Steam before launching Better Multiplayer Launcher.".into());
     }
@@ -143,29 +153,28 @@ pub fn start_game(
         .ok_or("Failed to get current executable dir path")?;
 
     if is_under_onedrive(parent_dir) {
-        return Err(format!(
+        return Err(LauncherError::UnsupportedLaunchPath(format!(
             "The launcher is running from a OneDrive-managed folder \"{}\", which can interfere with launcher operations. \
             Please move the launcher and BMPData folder to a local directory outside OneDrive.",
             parent_dir.display()
-        ).into());
+        )));
     }
 
     if is_under_tmp(parent_dir) {
-        return Err(format!(
+        return Err(LauncherError::UnsupportedLaunchPath(format!(
             "The launcher is running from a temporary folder \"{}\", which can interfere with launcher operations. \
             This usually means the release ZIP was not fully extracted and the launcher is being run directly from the ZIP. \
             Unpack the entire archive to a local directory and run the launcher from there.",
             parent_dir.display()
-        ).into());
+        )));
     }
 
     let content_dir_path = parent_dir.join(content_dir);
     if !content_dir_path.exists() {
-        return Err(format!(
+        return Err(LauncherError::ContentDirMissing(format!(
             "The content directory \"{}\" does not exist. This usually means the release ZIP was not fully extracted. Unpack the entire archive, not just the launcher executable.",
             content_dir_path.display()
-        )
-        .into());
+        )));
     }
 
     if !debug {
@@ -182,7 +191,11 @@ pub fn start_game(
                 "Please remove the above files from the game folder \"{}\" before launching.",
                 game_folder.display()
             );
-            return Err("Suspicious DLL files found in game folder".into());
+            return Err(LauncherError::ModsDetected(format!(
+                "Suspicious DLL files found in \"{}\": {}. Remove them before launching.",
+                game_folder.display(),
+                proxy_dlls.join(", ")
+            )));
         }
     }
 
@@ -190,24 +203,23 @@ pub fn start_game(
     tracing::info!("Injecting DLL: {}", dll_path.display());
 
     if !dll_path.exists() {
-        return Err(format!(
+        return Err(LauncherError::DllNotFound(format!(
             "DLL not found at {}. Make sure all files were unpacked from the release archive, not just the launcher executable.",
             dll_path.display()
-        )
-        .into());
+        )));
     }
 
     unsafe {
         // Set Steam App ID
         std::env::set_var("SteamAppId", ELDENRING_ID.to_string());
         // Set Content Dir
-        std::env::set_var("DEN_CONTENT_DIR", content_dir_path);
+        std::env::set_var("DEN_CONTENT_DIR", &content_dir_path);
     }
 
     // Create process
     let process_info = create_suspended_process(&executable_path)?;
 
-    // Inject DLL
+    // Inject main DLL
     inject_dll(&process_info, &dll_path)?;
 
     // Resume process
@@ -216,15 +228,19 @@ pub fn start_game(
     Ok(())
 }
 
-fn create_suspended_process(
-    executable_path: &Path,
-) -> Result<PROCESS_INFORMATION, Box<dyn std::error::Error>> {
-    let exe_path_cstr = std::ffi::CString::new(executable_path.to_str().ok_or("Invalid path")?)?;
+fn create_suspended_process(executable_path: &Path) -> Result<PROCESS_INFORMATION, LauncherError> {
+    let exe_path_cstr = std::ffi::CString::new(
+        executable_path
+            .to_str()
+            .ok_or_else(|| LauncherError::InvalidPath("Invalid path".into()))?,
+    )?;
 
     let startup_info = STARTUPINFOA::default();
     let mut process_info = PROCESS_INFORMATION::default();
 
-    let cwd = executable_path.parent().ok_or("Invalid executable path")?;
+    let cwd = executable_path
+        .parent()
+        .ok_or_else(|| LauncherError::InvalidPath("Invalid executable path".into()))?;
     std::env::set_current_dir(cwd)?;
 
     unsafe {
@@ -245,11 +261,10 @@ fn create_suspended_process(
     Ok(process_info)
 }
 
-fn inject_dll(
-    process_info: &PROCESS_INFORMATION,
-    dll_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let dll_path_str = dll_path.to_str().ok_or("Invalid path")?;
+fn inject_dll(process_info: &PROCESS_INFORMATION, dll_path: &Path) -> Result<(), LauncherError> {
+    let dll_path_str = dll_path
+        .to_str()
+        .ok_or_else(|| LauncherError::InvalidPath("Invalid path".into()))?;
     let wide_path: Vec<u16> = dll_path_str
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -268,7 +283,9 @@ fn inject_dll(
     };
 
     if str_addr.is_null() {
-        return Err("Failed to allocate memory in target process".into());
+        return Err(LauncherError::Other(
+            "Failed to allocate memory in target process".into(),
+        ));
     }
 
     let mut bytes_written: usize = 0;
@@ -289,7 +306,9 @@ fn inject_dll(
 
     let kernel32 = unsafe { GetModuleHandleA(s!("kernel32.dll"))? };
     let load_library = unsafe {
-        GetProcAddress(kernel32, s!("LoadLibraryW")).ok_or("Failed to get LoadLibraryW address")
+        GetProcAddress(kernel32, s!("LoadLibraryW")).ok_or_else(|| {
+            LauncherError::InjectionFailed("Failed to resolve LoadLibraryW in kernel32.dll.".into())
+        })
     }? as *const ();
 
     unsafe {
@@ -315,7 +334,10 @@ fn inject_dll(
         GetExitCodeThread(thread_handle, &mut load_offset)?;
 
         if load_offset == 0 {
-            return Err("DLL injection failed - LoadLibraryW returned NULL".into());
+            return Err(LauncherError::InjectionFailed(
+                "LoadLibraryW returned NULL. The DLL could not be loaded into the game process."
+                    .into(),
+            ));
         }
 
         tracing::debug!(

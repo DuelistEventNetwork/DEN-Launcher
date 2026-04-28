@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
-use den_signer::{ManifestFile, ManifestInner, ReleaseManifest};
+use den_signer::{ManifestFile, ManifestInner, OpaquePayload, ReleaseManifest, SignerError};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 #[derive(Parser)]
 #[command(name = "den-signer")]
@@ -27,7 +30,7 @@ enum Command {
         version: String,
         #[arg(long, default_value = "manifest.bin")]
         output: PathBuf,
-        /// Files to sign, each as `asset_name:install_path`
+        /// Files to sign, each as `source_path:install_path`
         #[arg(required = true)]
         files: Vec<String>,
     },
@@ -36,36 +39,38 @@ enum Command {
         #[arg(long)]
         public_key: PathBuf,
         manifest: PathBuf,
+        /// Paths to the signed DLLs referenced by the manifest.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
     },
 }
 
-fn load_signing_key(path: &Path) -> Result<SigningKey, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read private key: {e}"))?;
+fn load_signing_key(path: &Path) -> Result<SigningKey, SignerError> {
+    let bytes = std::fs::read(path)?;
     match bytes.len() {
         32 => Ok(SigningKey::from_bytes(&bytes.try_into().unwrap())),
         64 => SigningKey::from_keypair_bytes(&bytes.try_into().unwrap())
-            .map_err(|e| format!("Invalid keypair bytes: {e}")),
-        n => Err(format!(
+            .map_err(|e| SignerError::InvalidKey(format!("Invalid keypair bytes: {e}"))),
+        n => Err(SignerError::InvalidKey(format!(
             "Unexpected private key length: {n} bytes (expected 32 or 64)"
-        )),
+        ))),
     }
 }
 
-fn load_verifying_key(path: &Path) -> Result<VerifyingKey, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read public key: {e}"))?;
+fn load_verifying_key(path: &Path) -> Result<VerifyingKey, SignerError> {
+    let bytes = std::fs::read(path)?;
     let arr: [u8; 32] = bytes
         .try_into()
-        .map_err(|_| "Public key must be exactly 32 bytes".to_string())?;
-    VerifyingKey::from_bytes(&arr).map_err(|e| format!("Invalid public key: {e}"))
+        .map_err(|_| SignerError::InvalidKey("Public key must be exactly 32 bytes".into()))?;
+    VerifyingKey::from_bytes(&arr)
+        .map_err(|e| SignerError::InvalidKey(format!("Invalid public key: {e}")))
 }
 
-fn cmd_generate_keys(private_key: &Path, public_key: &Path) -> Result<(), String> {
+fn cmd_generate_keys(private_key: &Path, public_key: &Path) -> Result<(), SignerError> {
     let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
     let verifying_key = signing_key.verifying_key();
-    std::fs::write(private_key, signing_key.to_keypair_bytes())
-        .map_err(|e| format!("Failed to write private key: {e}"))?;
-    std::fs::write(public_key, verifying_key.to_bytes())
-        .map_err(|e| format!("Failed to write public key: {e}"))?;
+    std::fs::write(private_key, signing_key.to_keypair_bytes())?;
+    std::fs::write(public_key, verifying_key.to_bytes())?;
     println!("Generated keypair:");
     println!("  Private key : {}", private_key.display());
     println!("  Public  key : {}", public_key.display());
@@ -77,16 +82,18 @@ fn cmd_sign(
     version: String,
     output: &Path,
     files: &[String],
-) -> Result<(), String> {
+) -> Result<(), SignerError> {
     let signing_key = load_signing_key(private_key)?;
     let mut manifest_files: Vec<ManifestFile> = Vec::new();
 
     for spec in files {
         let (name, install_path) = spec.split_once(':').ok_or_else(|| {
-            format!("Invalid file spec {spec:?}: expected 'asset_name:install_path'")
+            SignerError::Other(format!(
+                "Invalid file spec {spec:?}: expected 'asset_name:install_path'"
+            ))
         })?;
 
-        let data = std::fs::read(name).map_err(|e| format!("Failed to read {name}: {e}"))?;
+        let data = std::fs::read(install_path).map_err(SignerError::Io)?;
         let sig: Signature = signing_key.sign(&data);
 
         manifest_files.push(ManifestFile {
@@ -102,40 +109,71 @@ fn cmd_sign(
         version,
         files: manifest_files,
     };
-    let manifest_sig: Signature = signing_key.sign(&bitcode::encode(&inner));
+    let payload = OpaquePayload::encode_from(&inner);
+    let manifest_sig: Signature = signing_key.sign(payload.bytes());
     let manifest = ReleaseManifest {
-        inner,
+        format_version: 1,
+        payload,
         sig: manifest_sig.to_bytes(),
     };
 
     manifest.validate()?;
-    std::fs::write(output, bitcode::encode(&manifest))
-        .map_err(|e| format!("Failed to write manifest: {e}"))?;
+    std::fs::write(output, bitcode::encode(&manifest))?;
     println!("Manifest written -> {}", output.display());
     Ok(())
 }
 
-fn cmd_verify(public_key: &Path, manifest_path: &Path) -> Result<(), String> {
+fn cmd_verify(
+    public_key: &Path,
+    manifest_path: &Path,
+    files: &[PathBuf],
+) -> Result<(), SignerError> {
     let verifying_key = load_verifying_key(public_key)?;
-    let raw = std::fs::read(manifest_path).map_err(|e| format!("Failed to read manifest: {e}"))?;
+    let raw = std::fs::read(manifest_path)?;
     let manifest = ReleaseManifest::decode(&raw)?;
 
     manifest.validate()?;
     manifest.verify(&verifying_key)?;
     println!("Manifest signature OK");
 
-    for mf in &manifest.inner.files {
-        let data =
-            std::fs::read(&mf.name).map_err(|e| format!("Failed to read {}: {e}", mf.name))?;
+    let mut provided_files: HashMap<String, &PathBuf> = HashMap::new();
+    for path in files {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                SignerError::InvalidKey(format!("Invalid file path: {}", path.display()))
+            })?
+            .to_string();
+
+        if provided_files.insert(name.clone(), path).is_some() {
+            return Err(SignerError::Other(format!(
+                "Duplicate file basename provided for verification: {}",
+                name
+            )));
+        }
+    }
+
+    let inner = manifest.decode_inner()?;
+
+    for mf in &inner.files {
+        let file_path = provided_files.get(&mf.name).ok_or_else(|| {
+            SignerError::Other(format!(
+                "Missing file for manifest asset {}: provide the path to {}",
+                mf.name, mf.name
+            ))
+        })?;
+
+        let data = std::fs::read(file_path)?;
         mf.verify(&data, &verifying_key)?;
-        println!("  {} OK", mf.name);
+        println!("  {} OK ({})", mf.name, file_path.display());
     }
 
     println!("All files verified successfully");
     Ok(())
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<(), SignerError> {
     match Args::parse().cmd {
         Command::GenerateKeys {
             private_key,
@@ -150,7 +188,8 @@ fn run() -> Result<(), String> {
         Command::Verify {
             public_key,
             manifest,
-        } => cmd_verify(&public_key, &manifest),
+            files,
+        } => cmd_verify(&public_key, &manifest, &files),
     }
 }
 

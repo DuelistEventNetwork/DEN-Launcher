@@ -1,15 +1,13 @@
 use std::{io::Read, path::Path};
 
 use crate::{
-    constants::ELDENRING_EXE,
+    constants::{ELDENRING_EXE, VERSION},
     injector::{get_pids_by_name, kill_process},
+    launcher_error::LauncherError,
 };
 
 use den_signer::{ReleaseManifest, VerifyingKey};
 use serde::Deserialize;
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-const RELEASE_PUBLIC_KEY: &[u8] = include_bytes!("../release_public_key.bin");
 
 #[derive(Deserialize)]
 struct ReleaseAsset {
@@ -23,13 +21,6 @@ struct Release {
     pub assets: Vec<ReleaseAsset>,
 }
 
-fn get_verifying_key() -> VerifyingKey {
-    let arr: [u8; 32] = RELEASE_PUBLIC_KEY
-        .try_into()
-        .expect("release_public_key.bin must be exactly 32 bytes");
-    VerifyingKey::from_bytes(&arr).expect("release_public_key.bin is not a valid ed25519 key")
-}
-
 fn make_request(url: &str, token: Option<&str>) -> ureq::Request {
     let mut req = ureq::get(url).set("User-Agent", &format!("denlauncher/{VERSION}"));
     if let Some(t) = token {
@@ -38,15 +29,17 @@ fn make_request(url: &str, token: Option<&str>) -> ureq::Request {
     req
 }
 
-fn download_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, String> {
+fn download_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, LauncherError> {
     let mut buf = Vec::new();
     make_request(url, token)
         .set("Accept", "application/octet-stream")
         .call()
-        .map_err(|e| format!("Failed to download {url}: {e}"))?
+        .map_err(|source| LauncherError::Download {
+            url: url.to_string(),
+            source: Box::new(source),
+        })?
         .into_reader()
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("Failed to read download for {url}: {e}"))?;
+        .read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -70,13 +63,13 @@ fn apply_manifest(
     exe_dir: &Path,
     token: Option<&str>,
     key: &VerifyingKey,
-) -> Result<(), String> {
-    let current_exe =
-        std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+) -> Result<(), LauncherError> {
+    let current_exe = std::env::current_exe()?;
+
+    let inner = manifest.decode_inner()?;
 
     // Collect files that need (re-)downloading.
-    let to_update: Vec<&den_signer::ManifestFile> = manifest
-        .inner
+    let to_update: Vec<&den_signer::ManifestFile> = inner
         .files
         .iter()
         .filter(|mf| {
@@ -109,7 +102,7 @@ fn apply_manifest(
             .assets
             .iter()
             .find(|a| a.name == mf.name)
-            .ok_or_else(|| format!("Asset '{}' not found in release", mf.name))?;
+            .ok_or_else(|| LauncherError::ReleaseAssetMissing(mf.name.clone()))?;
 
         tracing::info!("Downloading {}", mf.name);
         let data = download_bytes(&asset.url, token)?;
@@ -117,7 +110,7 @@ fn apply_manifest(
         tracing::info!("{} signature OK", mf.name);
 
         let target = ReleaseManifest::safe_join(exe_dir, &mf.install_path)
-            .ok_or_else(|| format!("Unsafe install_path in manifest: {}", mf.install_path))?;
+            .ok_or_else(|| LauncherError::UnsafeInstallPath(mf.install_path.clone()))?;
 
         pending.push((mf, data, target));
     }
@@ -130,24 +123,20 @@ fn apply_manifest(
     for (mf, data, target) in pending {
         if target == current_exe {
             let tmp_path = exe_dir.join(format!("_update_{}.tmp", mf.name));
-            std::fs::write(&tmp_path, &data)
-                .map_err(|e| format!("Failed to write launcher update temp file: {e}"))?;
-            self_replace::self_replace(&tmp_path)
-                .map_err(|e| format!("Failed to self-replace launcher: {e}"))?;
+            std::fs::write(&tmp_path, &data)?;
+            self_replace::self_replace(&tmp_path).map_err(|e| {
+                LauncherError::SelfReplaceFailed(format!(
+                    "Could not apply the launcher update: {e}"
+                ))
+            })?;
             let _ = std::fs::remove_file(&tmp_path);
             tracing::info!("Launcher queued for replacement");
             self_replaced = true;
         } else {
             if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    format!(
-                        "Failed to create target directory {}: {e}",
-                        parent.display()
-                    )
-                })?;
+                std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&target, &data)
-                .map_err(|e| format!("Failed to write updated file {}: {e}", target.display()))?;
+            std::fs::write(&target, &data)?;
             tracing::info!("Updated {}", target.display());
         }
     }
@@ -162,15 +151,20 @@ fn apply_manifest(
     Ok(())
 }
 
-pub fn start_updater(repo_owner: &str, repo_name: &str, token: Option<&str>) {
+pub fn start_updater(
+    repo_owner: &str,
+    repo_name: &str,
+    token: Option<&str>,
+    verifying_key: &VerifyingKey,
+) -> Result<Option<ReleaseManifest>, LauncherError> {
     let Some(release) = get_latest_release(repo_owner, repo_name, token) else {
         tracing::warn!("Failed to fetch latest release info");
-        return;
+        return Ok(None);
     };
 
     let Some(manifest_asset) = release.assets.iter().find(|a| a.name == "manifest.bin") else {
         tracing::warn!("No manifest.bin in release assets; skipping update");
-        return;
+        return Ok(None);
     };
 
     tracing::info!(
@@ -181,51 +175,37 @@ pub fn start_updater(repo_owner: &str, repo_name: &str, token: Option<&str>) {
         Ok(bytes) => bytes,
         Err(err) => {
             tracing::error!("Failed to download manifest.bin: {}", err);
-            return;
+            return Ok(None);
         }
     };
-    let manifest = match ReleaseManifest::decode(&manifest_bytes) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!("Failed to decode manifest: {e}");
-            return;
-        }
-    };
+    let manifest = ReleaseManifest::decode(&manifest_bytes)?;
 
-    let verifying_key = get_verifying_key();
-
-    if let Err(e) = manifest.validate() {
-        tracing::error!("Manifest validation failed: {e}");
-        return;
-    }
-
-    if let Err(e) = manifest.verify(&verifying_key) {
-        tracing::error!("Manifest signature invalid: {e}");
-        return;
-    }
+    manifest.validate()?;
+    manifest.verify(verifying_key)?;
 
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(err) => {
             tracing::error!("Failed to get current exe: {}", err);
-            return;
+            return Ok(None);
         }
     };
     let exe_dir = match current_exe.parent() {
         Some(dir) => dir,
         None => {
             tracing::error!("Failed to get exe dir");
-            return;
+            return Ok(None);
         }
     };
 
-    if let Err(err) = apply_manifest(&manifest, &release, exe_dir, token, &verifying_key) {
-        tracing::error!("Update failed: {}", err);
-    }
+    apply_manifest(&manifest, &release, exe_dir, token, verifying_key)?;
+    Ok(Some(manifest))
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{constants::RELEASE_PUBLIC_KEY, get_verifying_key};
+
     use super::*;
 
     #[test]
@@ -270,19 +250,23 @@ mod tests {
             .expect("failed to download manifest.bin");
         let manifest = ReleaseManifest::decode(&bytes).expect("failed to decode manifest");
 
-        let key = get_verifying_key();
+        let key = get_verifying_key(RELEASE_PUBLIC_KEY);
         manifest.validate().expect("manifest validation failed");
         manifest.verify(&key).expect("manifest signature invalid");
 
+        let manifest_inner = manifest
+            .decode_inner()
+            .expect("failed to decode manifest payload");
+
         assert!(
-            !manifest.inner.version.is_empty(),
+            !manifest_inner.version.is_empty(),
             "version must not be empty"
         );
         assert!(
-            !manifest.inner.files.is_empty(),
+            !manifest_inner.files.is_empty(),
             "manifest must list at least one file"
         );
-        for mf in &manifest.inner.files {
+        for mf in &manifest_inner.files {
             assert!(!mf.name.is_empty(), "file name must not be empty");
             assert!(
                 !mf.install_path.is_empty(),
@@ -292,8 +276,8 @@ mod tests {
 
         eprintln!(
             "OK  manifest v{}  ({} file(s))",
-            manifest.inner.version,
-            manifest.inner.files.len()
+            manifest_inner.version,
+            manifest_inner.files.len()
         );
     }
 }

@@ -3,3 +3,5 @@
 release_private_key.bin
 run_test.bat
 denlauncher.log
+release.sh
+sideload/
