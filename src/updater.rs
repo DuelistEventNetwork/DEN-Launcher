@@ -1,60 +1,80 @@
-use std::{io::Read, path::Path};
+use std::path::Path;
 
 use crate::{
-    constants::{ELDENRING_EXE, VERSION},
+    constants::ELDENRING_EXE,
     injector::{get_pids_by_name, kill_process},
     launcher_error::LauncherError,
 };
 
 use den_signer::{ReleaseManifest, VerifyingKey};
-use serde::Deserialize;
 
-#[derive(Deserialize)]
 struct ReleaseAsset {
     pub url: String,
     pub name: String,
 }
 
-#[derive(Deserialize)]
 struct Release {
     pub tag_name: String,
     pub assets: Vec<ReleaseAsset>,
 }
 
-fn make_request(url: &str, token: Option<&str>) -> ureq::Request {
-    let mut req = ureq::get(url).set("User-Agent", &format!("denlauncher/{VERSION}"));
-    if let Some(t) = token {
-        req = req.set("Authorization", &format!("token {t}"));
+fn parse_release(body: &[u8]) -> Option<Release> {
+    let s = std::str::from_utf8(body).ok()?;
+    let tag_name = json_str(s, "tag_name")?;
+
+    let mut assets = Vec::new();
+    let mut search = s;
+
+    while let Some(name) = json_str(search, "name") {
+        let pos = search.find(&format!(r#""{name}""#))? + name.len() + 2;
+        search = &search[pos..];
+        let window = &search[..search.len().min(300)];
+        if let Some(url) = json_str(window, "url") {
+            assets.push(ReleaseAsset { name, url });
+        }
     }
-    req
+
+    Some(Release { tag_name, assets })
+}
+
+fn json_str(s: &str, key: &str) -> Option<String> {
+    let needle = format!(r#""{key}""#);
+    let after_key = s.find(&needle)? + needle.len();
+    let after_colon = after_key + s[after_key..].find('"')? + 1;
+    let end = after_colon + s[after_colon..].find('"')?;
+    Some(s[after_colon..end].to_string())
 }
 
 fn download_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, LauncherError> {
-    let mut buf = Vec::new();
-    make_request(url, token)
-        .set("Accept", "application/octet-stream")
-        .call()
-        .map_err(|source| LauncherError::Download {
-            url: url.to_string(),
-            source: Box::new(source),
-        })?
-        .into_reader()
-        .read_to_end(&mut buf)?;
-    Ok(buf)
+    let headers = build_headers(token, "application/octet-stream");
+    let pairs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (status, body) = crate::winhttp_client::get(url, &pairs)?;
+    if status != 200 {
+        return Err(LauncherError::Http(format!("HTTP {status} for {url}")));
+    }
+    Ok(body)
+}
+
+fn build_headers<'a>(token: Option<&'a str>, accept: &'a str) -> Vec<(&'a str, String)> {
+    let mut h = vec![("Accept", accept.to_string())];
+    if let Some(t) = token {
+        h.push(("Authorization", format!("token {t}")));
+    }
+    h
 }
 
 fn get_latest_release(repo_owner: &str, repo_name: &str, token: Option<&str>) -> Option<Release> {
-    make_request(
-        &format!("https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"),
-        token,
-    )
-    .set("Accept", "application/vnd.github+json")
-    .call()
-    .map_err(|e| tracing::error!("Failed to fetch release: {e}"))
-    .ok()?
-    .into_json::<Release>()
-    .map_err(|e| tracing::error!("Failed to parse release JSON: {e}"))
-    .ok()
+    let url = format!("https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest");
+    let headers = build_headers(token, "application/vnd.github+json");
+    let pairs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (status, body) = crate::winhttp_client::get(&url, &pairs)
+        .map_err(|e| tracing::error!("Failed to fetch release: {e}"))
+        .ok()?;
+    if status != 200 {
+        tracing::error!("GitHub API returned HTTP {status}");
+        return None;
+    }
+    parse_release(&body)
 }
 
 fn apply_manifest(

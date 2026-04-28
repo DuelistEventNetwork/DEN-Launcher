@@ -1,11 +1,14 @@
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, MAX_PATH};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 
 use crate::constants::{ELDENRING_ID, PROCESS_INJECTION_ACCESS};
 use crate::launcher_error::LauncherError;
+use crate::steamlocate::locate_steam_game;
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use steamlocate::SteamDir;
 use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::Win32::System::Memory::{
@@ -56,33 +59,6 @@ fn is_steam_running() -> bool {
     !get_pids_by_name("steam.exe").is_empty()
 }
 
-fn locate_executable(game_executable: &str) -> Result<PathBuf, LauncherError> {
-    let steam_dir = SteamDir::locate().map_err(|_| {
-        LauncherError::SteamNotFound(
-            "Please install Steam and make sure it is available on this machine.".into(),
-        )
-    })?;
-
-    let (app, lib) = steam_dir
-        .find_app(ELDENRING_ID)
-        .ok()
-        .flatten()
-        .ok_or_else(|| {
-            LauncherError::GameNotFound(
-                "Elden Ring was not found in your Steam library. Please verify the game is installed and Steam has the correct library path.".into()
-            )
-        })?;
-
-    let game_path = lib.resolve_app_dir(&app).join("Game").join(game_executable);
-    if !game_path.exists() {
-        return Err(
-            LauncherError::GameNotFound("Elden Ring executable could not be found in the Steam game directory. Verify the game installation and that Steam is not running from an unsupported location.".into())
-        );
-    }
-
-    Ok(game_path)
-}
-
 fn find_common_proxy_dlls(dir: &Path) -> Vec<String> {
     COMMON_PROXY_DLLS
         .iter()
@@ -104,19 +80,47 @@ pub fn kill_process(pid: u32) {
 }
 
 pub fn get_pids_by_name(name: &str) -> Vec<u32> {
-    let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    system
-        .processes()
-        .values()
-        .filter(move |process| {
-            process
-                .name()
-                .to_str()
-                .is_some_and(|n| n.to_lowercase().contains(name))
-        })
-        .map(|process| process.pid().as_u32())
-        .collect()
+    let name_lower = name.to_lowercase();
+    let mut pids = Vec::new();
+
+    let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
+        Ok(h) => h,
+        Err(_) => return pids,
+    };
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+
+    if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+        loop {
+            let exe_name = String::from_utf16_lossy(
+                &entry.szExeFile[..entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(MAX_PATH as usize)],
+            )
+            .to_lowercase();
+
+            if exe_name.contains(&name_lower) {
+                pids.push(entry.th32ProcessID);
+            }
+
+            entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+
+            if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                break;
+            }
+        }
+    }
+
+    let _ = unsafe { CloseHandle(snapshot) };
+    pids
 }
 
 pub fn start_game(
@@ -142,7 +146,7 @@ pub fn start_game(
     }
 
     // Setup paths
-    let executable_path = locate_executable(game_executable)?;
+    let executable_path = locate_steam_game(game_executable)?;
     let game_folder = executable_path
         .parent()
         .ok_or("Failed to get game executable parent directory")?;
@@ -336,10 +340,7 @@ fn inject_dll(process_info: &PROCESS_INFORMATION, dll_path: &Path) -> Result<(),
             ));
         }
 
-        tracing::debug!(
-            "DLL successfully loaded at: eldenring.exe + {:#018x}",
-            load_offset
-        );
+        tracing::debug!("DLL successfully loaded at: eldenring.exe + {load_offset:#010x}",);
         CloseHandle(thread_handle)?;
     }
 

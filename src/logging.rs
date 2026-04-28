@@ -1,18 +1,21 @@
-use tracing_panic::panic_hook;
-use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt, Layer};
-use windows::core::Result;
+use tracing_subscriber::fmt::FmtContext;
+use tracing_subscriber::fmt::format::{self, FormatEvent, FormatFields};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{self, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+
 use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
 use windows::Win32::System::Console::GetConsoleMode;
 use windows::Win32::System::Console::GetStdHandle;
-use windows::Win32::System::Console::SetConsoleMode;
-use windows::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
 use windows::Win32::System::Console::STD_OUTPUT_HANDLE;
+use windows::Win32::System::Console::SetConsoleMode;
+use windows::core::Result;
 
 pub fn enable_ansi_support() -> Result<()> {
     unsafe {
         let handle = GetStdHandle(STD_OUTPUT_HANDLE)?;
         if handle == HANDLE::default() {
-            return Err(windows::core::Error::from_win32());
+            return Err(windows::core::Error::from_thread());
         }
 
         let mut mode = std::mem::zeroed();
@@ -56,33 +59,52 @@ pub fn den_panic_hook(panic_info: &std::panic::PanicHookInfo) {
             windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
         );
     }
-    panic_hook(panic_info);
     std::thread::sleep(std::time::Duration::from_secs(10));
 }
 
 pub fn setup_logging(debug: bool) {
     let stdout_log = tracing_subscriber::fmt::layer()
-        .pretty()
-        .without_time()
-        .with_file(false)
-        .with_line_number(false)
         // disable module path
-        .with_target(false);
+        .with_target(false)
+        .event_format(ColoredCompact);
 
-    let filter =
-        tracing_subscriber::filter::EnvFilter::from_default_env().add_directive(if debug {
-            tracing_subscriber::filter::LevelFilter::DEBUG.into()
-        } else {
-            tracing_subscriber::filter::LevelFilter::INFO.into()
-        });
-    let registry = tracing_subscriber::registry().with(stdout_log.with_filter(filter));
-    if debug {
-        let appender = tracing_appender::rolling::never("./", "denlauncher.log");
-        let file_log = tracing_subscriber::fmt::layer()
-            .with_writer(appender)
-            .with_ansi(false);
-        registry.with(file_log).init();
+    let filter = if debug {
+        tracing_subscriber::filter::LevelFilter::DEBUG
     } else {
-        registry.init();
+        tracing_subscriber::filter::LevelFilter::INFO
+    };
+    let registry = tracing_subscriber::registry().with(stdout_log.with_filter(filter));
+    registry.init();
+}
+
+struct ColoredCompact;
+
+impl<S, N> FormatEvent<S, N> for ColoredCompact
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let level = *event.metadata().level();
+
+        let (level_str, color) = match level {
+            tracing::Level::ERROR => ("ERROR", "\x1b[31m"), // red
+            tracing::Level::WARN => ("WARN ", "\x1b[33m"),  // yellow
+            tracing::Level::INFO => ("INFO ", "\x1b[32m"),  // green
+            tracing::Level::DEBUG => ("DEBUG", "\x1b[34m"), // blue
+            tracing::Level::TRACE => ("TRACE", "\x1b[35m"), // magenta
+        };
+
+        let reset = "\x1b[0m";
+        let bold = "\x1b[1m";
+
+        write!(writer, "{color}{bold}{level_str}{reset} {color}")?;
+        ctx.field_format().format_fields(writer.by_ref(), event)?;
+        writeln!(writer, "{reset}")
     }
 }

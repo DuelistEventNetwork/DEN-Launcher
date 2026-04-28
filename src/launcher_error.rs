@@ -8,16 +8,6 @@ pub enum LauncherError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("HTTP request failed for {url}: {source}")]
-    Download {
-        url: String,
-        #[source]
-        source: Box<ureq::Error>,
-    },
-
-    #[error("failed to parse release JSON: {0}")]
-    ReleaseJson(#[from] serde_json::Error),
-
     #[error("asset not found in release: {0}")]
     ReleaseAssetMissing(String),
 
@@ -65,6 +55,9 @@ pub enum LauncherError {
 
     #[error("restart required to complete update")]
     RestartRequired,
+
+    #[error("HTTP error: {0}")]
+    Http(String),
 }
 
 impl From<String> for LauncherError {

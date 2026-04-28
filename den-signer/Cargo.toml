@@ -12,8 +12,28 @@ name = "den-signer"
 path = "src/main.rs"
 
 [dependencies]
-ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
-rand = "0.8"
-bitcode = "0.6.7"
-clap = { version = "4", features = ["derive"] }
+bitcode = "0.6.9"
 thiserror = "1.0"
+
+[dependencies.ed25519-dalek]
+version = "2.2.0"
+default-features = false
+features = []
+
+[dependencies.rand]
+version = "0.8"
+optional = true
+
+[dependencies.clap]
+version = "4"
+features = ["derive"]
+optional = true
+
+[features]
+default = ["signing"]
+signing = [
+    "dep:rand",
+    "dep:clap",
+    "ed25519-dalek/rand_core",
+    "ed25519-dalek/fast",
+]
