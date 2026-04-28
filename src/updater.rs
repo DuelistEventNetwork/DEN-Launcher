@@ -107,7 +107,7 @@ fn apply_manifest(
         tracing::info!("Downloading {}", mf.name);
         let data = download_bytes(&asset.url, token)?;
         mf.verify(&data, key)?;
-        tracing::info!("{} signature OK", mf.name);
+        tracing::debug!("{} signature OK", mf.name);
 
         let target = ReleaseManifest::safe_join(exe_dir, &mf.install_path)
             .ok_or_else(|| LauncherError::UnsafeInstallPath(mf.install_path.clone()))?;
@@ -130,7 +130,7 @@ fn apply_manifest(
                 ))
             })?;
             let _ = std::fs::remove_file(&tmp_path);
-            tracing::info!("Launcher queued for replacement");
+            tracing::debug!("Launcher queued for replacement");
             self_replaced = true;
         } else {
             if let Some(parent) = target.parent() {
@@ -143,8 +143,7 @@ fn apply_manifest(
 
     if self_replaced {
         tracing::warn!("Launcher was updated; please restart to apply changes");
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        std::process::exit(0);
+        return Err(LauncherError::RestartRequired);
     }
 
     tracing::info!("Update complete");

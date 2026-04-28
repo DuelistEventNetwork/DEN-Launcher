@@ -191,11 +191,7 @@ pub fn start_game(
                 "Please remove the above files from the game folder \"{}\" before launching.",
                 game_folder.display()
             );
-            return Err(LauncherError::ModsDetected(format!(
-                "Suspicious DLL files found in \"{}\": {}. Remove them before launching.",
-                game_folder.display(),
-                proxy_dlls.join(", ")
-            )));
+            return Err(LauncherError::ModsDetected);
         }
     }
 

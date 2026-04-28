@@ -54,14 +54,17 @@ pub enum LauncherError {
     #[error("unsupported launch path: {0}")]
     UnsupportedLaunchPath(String),
 
-    #[error("mods detected in game folder: {0}")]
-    ModsDetected(String),
+    #[error("suspicious DLL files found in game folder")]
+    ModsDetected,
 
     #[error("DLL injection failed: {0}")]
     InjectionFailed(String),
 
     #[error("self-update failed: {0}")]
     SelfReplaceFailed(String),
+
+    #[error("restart required to complete update")]
+    RestartRequired,
 }
 
 impl From<String> for LauncherError {

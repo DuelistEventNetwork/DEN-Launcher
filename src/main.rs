@@ -15,7 +15,7 @@ use injector::start_game;
 use logging::{den_panic_hook, enable_ansi_support, setup_logging};
 use updater::start_updater;
 
-use crate::constants::RELEASE_PUBLIC_KEY;
+use crate::{constants::RELEASE_PUBLIC_KEY, launcher_error::LauncherError};
 
 #[derive(Parser)]
 #[command(name = "DenLauncher")]
@@ -78,9 +78,14 @@ fn main() {
             &get_verifying_key(RELEASE_PUBLIC_KEY),
         ) {
             Ok(opt) => opt,
+            Err(LauncherError::RestartRequired) => {
+                wait_for_exit();
+                None
+            }
             Err(err) => {
                 tracing::error!("Updater failed: {err}");
-                std::process::exit(1);
+                wait_for_exit();
+                None
             }
         }
     };
@@ -94,10 +99,20 @@ fn main() {
         args.debug,
     ) {
         tracing::error!("Failed to start Elden Ring: {}", err);
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        std::process::exit(1);
+        wait_for_exit();
     } else {
         tracing::info!("Elden Ring started successfully!");
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
+}
+
+fn wait_for_exit() {
+    use std::io::Read;
+
+    let mut stdin = std::io::stdin();
+
+    tracing::info!("Press any key to exit...");
+
+    let _ = stdin.read(&mut [0u8]).unwrap();
+    std::process::exit(1);
 }
