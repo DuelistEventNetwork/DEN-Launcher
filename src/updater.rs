@@ -7,42 +7,18 @@ use crate::{
 };
 
 use den_signer::{ReleaseManifest, VerifyingKey};
+use serde::Deserialize;
 
+#[derive(Deserialize)]
 struct ReleaseAsset {
     pub url: String,
     pub name: String,
 }
 
+#[derive(Deserialize)]
 struct Release {
     pub tag_name: String,
     pub assets: Vec<ReleaseAsset>,
-}
-
-fn parse_release(body: &[u8]) -> Option<Release> {
-    let s = std::str::from_utf8(body).ok()?;
-    let tag_name = json_str(s, "tag_name")?;
-
-    let mut assets = Vec::new();
-    let mut search = s;
-
-    while let Some(name) = json_str(search, "name") {
-        let pos = search.find(&format!(r#""{name}""#))? + name.len() + 2;
-        search = &search[pos..];
-        let window = &search[..search.len().min(300)];
-        if let Some(url) = json_str(window, "url") {
-            assets.push(ReleaseAsset { name, url });
-        }
-    }
-
-    Some(Release { tag_name, assets })
-}
-
-fn json_str(s: &str, key: &str) -> Option<String> {
-    let needle = format!(r#""{key}""#);
-    let after_key = s.find(&needle)? + needle.len();
-    let after_colon = after_key + s[after_key..].find('"')? + 1;
-    let end = after_colon + s[after_colon..].find('"')?;
-    Some(s[after_colon..end].to_string())
 }
 
 fn download_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, LauncherError> {
@@ -74,7 +50,9 @@ fn get_latest_release(repo_owner: &str, repo_name: &str, token: Option<&str>) ->
         tracing::error!("GitHub API returned HTTP {status}");
         return None;
     }
-    parse_release(&body)
+    serde_json::from_slice(&body)
+        .map_err(|e| tracing::error!("Failed to parse release JSON: {e}"))
+        .ok()
 }
 
 fn apply_manifest(

@@ -21,6 +21,8 @@ self-replace = "1.5.0"
 den-signer = { path = "den-signer", default-features = false }
 thiserror = "1.0"
 pico-args = { version = "0.5", features = ["eq-separator"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [build-dependencies]
 winres = "0.1"
