@@ -5,9 +5,11 @@ mod logging;
 mod migrations;
 mod steamlocate;
 mod updater;
+mod url_handler;
+mod util;
 mod winhttp_client;
 
-use std::{env, path::PathBuf};
+use std::path::PathBuf;
 
 use constants::ELDENRING_EXE;
 use den_signer::VerifyingKey;
@@ -16,10 +18,14 @@ use injector::start_game;
 use logging::{den_panic_hook, enable_ansi_support, setup_logging};
 use updater::start_updater;
 
-use crate::{constants::RELEASE_PUBLIC_KEY, launcher_error::LauncherError};
+use crate::{
+    constants::{RELEASE_PUBLIC_KEY, URL_PREFIX},
+    launcher_error::LauncherError,
+};
 
 struct Args {
     skip_updates: bool,
+    skip_url_scheme: bool,
     updater_repo_owner: String,
     updater_repo_name: String,
     updater_repo_private_key: Option<String>,
@@ -35,6 +41,7 @@ impl Args {
         Ok(Args {
             skip_updates: pargs.contains("--skip-updates")
                 || std::env::var("DEN_SKIP_UPDATES").is_ok(),
+            skip_url_scheme: pargs.contains("--skip-url-scheme"),
             updater_repo_owner: pargs
                 .opt_value_from_str("--updater-repo-owner")?
                 .or_else(|| std::env::var("DEN_REPO_OWNER").ok())
@@ -66,17 +73,51 @@ fn get_verifying_key(bytes: &[u8; 32]) -> VerifyingKey {
 }
 
 fn main() {
+    enable_ansi_support().ok();
+    std::panic::set_hook(Box::new(den_panic_hook));
+
+    let raw_args: Vec<String> = std::env::args().collect();
+    let url_arg = raw_args
+        .get(1)
+        .filter(|a| a.starts_with(URL_PREFIX))
+        .cloned();
+
+    if let Some(ref url) = url_arg {
+        setup_logging(false);
+        tracing::info!("Launched via URL scheme: {url}");
+
+        match url_handler::try_send_to_running_game(url) {
+            Ok(true) => {
+                tracing::info!("Payload delivered to running game");
+                return;
+            }
+            Ok(false) => {
+                tracing::debug!("Game not running; setting BMP_URL and launching normally");
+                url_handler::set_payload_env(url);
+            }
+            Err(e) => {
+                tracing::error!("IPC error forwarding URL payload: {e}");
+                return;
+            }
+        }
+    }
+
     let args = Args::parse().unwrap_or_else(|e| {
         eprintln!("Error parsing arguments: {e}");
         wait_for_exit();
-        unreachable!()
     });
 
-    enable_ansi_support().ok();
+    if url_arg.is_none() {
+        setup_logging(args.debug);
+    }
 
-    setup_logging(args.debug);
-
-    std::panic::set_hook(Box::new(den_panic_hook));
+    if !args.skip_url_scheme {
+        let exe = std::env::current_exe().expect("Failed to get current exe path");
+        if let Err(e) = url_handler::try_register_url_scheme(&exe.to_string_lossy()) {
+            tracing::error!("Failed to register URL scheme: {e}");
+            wait_for_exit();
+        }
+    }
 
     tracing::info!(
         "Starting Better Multiplayer Launcher v{}",
@@ -106,12 +147,10 @@ fn main() {
             Ok(opt) => opt,
             Err(LauncherError::RestartRequired) => {
                 wait_for_exit();
-                unreachable!()
             }
             Err(err) => {
                 tracing::error!("Updater failed: {err}");
                 wait_for_exit();
-                unreachable!()
             }
         }
     };
@@ -126,20 +165,15 @@ fn main() {
     ) {
         tracing::error!("Failed to start Elden Ring: {}", err);
         wait_for_exit();
-        unreachable!()
     } else {
         tracing::info!("Elden Ring started successfully!");
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
 }
 
-fn wait_for_exit() {
+fn wait_for_exit() -> ! {
     use std::io::Read;
-
-    let mut stdin = std::io::stdin();
-
     tracing::info!("Press any key to exit...");
-
-    let _ = stdin.read(&mut [0u8]).unwrap();
+    let _ = std::io::stdin().read(&mut [0u8]);
     std::process::exit(1);
 }

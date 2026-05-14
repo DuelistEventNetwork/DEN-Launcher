@@ -11,6 +11,8 @@ use windows::Win32::System::Console::STD_OUTPUT_HANDLE;
 use windows::Win32::System::Console::SetConsoleMode;
 use windows::core::Result;
 
+use crate::util::wstr;
+
 pub fn enable_ansi_support() -> Result<()> {
     unsafe {
         let handle = GetStdHandle(STD_OUTPUT_HANDLE)?;
@@ -46,16 +48,11 @@ pub fn den_panic_hook(panic_info: &std::panic::PanicHookInfo) {
         message = format!("A panic occurred\nReason: {reason}");
     }
 
-    let mut message_utf16: Vec<u16> = message.encode_utf16().collect();
-    message_utf16.push(0);
-    let mut title_utf16: Vec<u16> = title.encode_utf16().collect();
-    title_utf16.push(0);
-
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
             None,
-            windows::core::PCWSTR(message_utf16.as_ptr()),
-            windows::core::PCWSTR(title_utf16.as_ptr()),
+            windows::core::PCWSTR(wstr(&message).as_ptr()),
+            windows::core::PCWSTR(wstr(title).as_ptr()),
             windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
         );
     }

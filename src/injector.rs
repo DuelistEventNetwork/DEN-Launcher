@@ -6,6 +6,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use crate::constants::{ELDENRING_ID, PROCESS_INJECTION_ACCESS};
 use crate::launcher_error::LauncherError;
 use crate::steamlocate::locate_steam_game;
+use crate::util::wstr;
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -265,10 +266,7 @@ fn inject_dll(process_info: &PROCESS_INFORMATION, dll_path: &Path) -> Result<(),
     let dll_path_str = dll_path
         .to_str()
         .ok_or_else(|| LauncherError::InvalidPath("Invalid path".into()))?;
-    let wide_path: Vec<u16> = dll_path_str
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide_path = wstr(dll_path_str);
     let pcwstr = PCWSTR::from_raw(wide_path.as_ptr());
     let buffer_size = (wide_path.len()) * std::mem::size_of::<u16>();
 

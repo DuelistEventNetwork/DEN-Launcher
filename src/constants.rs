@@ -5,6 +5,8 @@ use windows::Win32::System::Threading::{
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub const LAUNCHER_NAME: &str = "Better Multiplayer Launcher";
+
 pub const ELDENRING_ID: u32 = 1245620;
 pub const ELDENRING_EXE: &str = "eldenring.exe";
 
@@ -18,3 +20,8 @@ pub static PROCESS_INJECTION_ACCESS: PROCESS_ACCESS_RIGHTS = PROCESS_ACCESS_RIGH
 );
 
 pub const RELEASE_PUBLIC_KEY: &[u8; 32] = include_bytes!("../release_public_key.bin");
+
+pub const URL_SCHEME: &str = "bmp";
+pub const URL_PREFIX: &str = "bmp://";
+
+pub const IPC_PIPE_NAME: &str = r"\\.\pipe\better_multiplayer_ipc";

@@ -14,11 +14,7 @@ use windows::{
     core::PCWSTR,
 };
 
-use crate::{constants::VERSION, launcher_error::LauncherError};
-
-fn wstr(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
+use crate::{constants::VERSION, launcher_error::LauncherError, util::wstr};
 
 fn last_os_err(context: &str) -> LauncherError {
     LauncherError::Http(format!("{context}: {:?}", unsafe { GetLastError() }))
