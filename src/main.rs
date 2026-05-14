@@ -21,6 +21,7 @@ use updater::start_updater;
 use crate::{
     constants::{RELEASE_PUBLIC_KEY, URL_PREFIX},
     launcher_error::LauncherError,
+    util::wait_for_exit,
 };
 
 struct Args {
@@ -169,11 +170,4 @@ fn main() {
         tracing::info!("Elden Ring started successfully!");
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
-}
-
-fn wait_for_exit() -> ! {
-    use std::io::Read;
-    tracing::info!("Press any key to exit...");
-    let _ = std::io::stdin().read(&mut [0u8]);
-    std::process::exit(1);
 }

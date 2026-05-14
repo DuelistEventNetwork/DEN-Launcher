@@ -6,7 +6,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use crate::constants::{ELDENRING_ID, PROCESS_INJECTION_ACCESS};
 use crate::launcher_error::LauncherError;
 use crate::steamlocate::locate_steam_game;
-use crate::util::wstr;
+use crate::util::{promp_confirmation, wstr};
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -158,11 +158,13 @@ pub fn start_game(
         .ok_or("Failed to get current executable dir path")?;
 
     if is_under_onedrive(parent_dir) {
-        return Err(LauncherError::UnsupportedLaunchPath(format!(
-            "The launcher is running from a OneDrive-managed folder \"{}\", which can interfere with launcher operations. \
-            Please move the launcher and BMPData folder to a local directory outside OneDrive.",
-            parent_dir.display()
-        )));
+        tracing::warn!("The launcher is running from a OneDrive-managed folder:");
+        tracing::warn!("{}", parent_dir.display());
+        tracing::warn!("This can interfere with launcher operations.");
+        tracing::warn!(
+            "Please try moving it out of the OneDrive folder if you encounter any issues."
+        );
+        promp_confirmation()
     }
 
     if is_under_tmp(parent_dir) {

@@ -1,3 +1,5 @@
+use crate::launcher_error::LauncherError;
+use std::io::Read;
 use windows::{
     Win32::{
         Foundation::ERROR_SUCCESS,
@@ -8,8 +10,6 @@ use windows::{
     },
     core::PCWSTR,
 };
-
-use crate::launcher_error::LauncherError;
 
 pub fn wstr(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
@@ -104,4 +104,15 @@ pub fn reg_write(
         result.map_err(LauncherError::Windows)?;
         Ok(())
     }
+}
+
+pub fn wait_for_exit() -> ! {
+    tracing::info!("Press any key to exit...");
+    let _ = std::io::stdin().read(&mut [0u8]);
+    std::process::exit(1);
+}
+
+pub fn promp_confirmation() {
+    tracing::warn!("Press any key to continue...");
+    let _ = std::io::stdin().read(&mut [0u8]);
 }
