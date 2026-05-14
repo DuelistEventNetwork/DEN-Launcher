@@ -2,7 +2,7 @@
 members = ["den-signer"]
 
 [package]
-name = "DEN-Launcher"
+name = "BetterMultiplayer"
 version = "2.1.0"
 edition = "2024"
 

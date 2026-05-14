@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "DEN-Launcher"
+name = "BetterMultiplayer"
 version = "2.1.0"
 dependencies = [
  "den-signer",
